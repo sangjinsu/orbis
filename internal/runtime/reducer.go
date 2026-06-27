@@ -177,7 +177,7 @@ func (r Reducer) Apply(ctx context.Context, state domain.SessionState, event dom
 }
 
 func (r Reducer) reduceTimerFired(state domain.SessionState, event domain.Event) (ReduceResult, error) {
-	if isTerminalRunStatus(state.RunStatus) {
+	if domain.IsTerminalRunStatus(state.RunStatus) {
 		return ReduceResult{NextState: state}, nil
 	}
 	var payload TimerFiredPayload
@@ -258,7 +258,7 @@ func reduceFailure(state domain.SessionState, event domain.Event) (ReduceResult,
 // reduceToolFailure decides whether to retry a failed/timed-out tool call or
 // fail the run, using the static retry policy. It never executes a tool.
 func (r Reducer) reduceToolFailure(state domain.SessionState, event domain.Event) (ReduceResult, error) {
-	if isTerminalRunStatus(state.RunStatus) {
+	if domain.IsTerminalRunStatus(state.RunStatus) {
 		return ReduceResult{NextState: state}, nil
 	}
 	var payload ToolCallEventPayload
@@ -339,7 +339,7 @@ func (r Reducer) scheduleToolRetry(state domain.SessionState, event domain.Event
 }
 
 func reduceToolRejected(state domain.SessionState, event domain.Event) (ReduceResult, error) {
-	if isTerminalRunStatus(state.RunStatus) {
+	if domain.IsTerminalRunStatus(state.RunStatus) {
 		return ReduceResult{NextState: state}, nil
 	}
 	state.RunStatus = domain.RunFailed
@@ -520,7 +520,7 @@ func reduceToolCallSucceeded(state domain.SessionState, event domain.Event) (Red
 	if payload.ToolCallID == "" {
 		return ReduceResult{}, fmt.Errorf("tool_call_id is required")
 	}
-	if isTerminalRunStatus(state.RunStatus) {
+	if domain.IsTerminalRunStatus(state.RunStatus) {
 		return ReduceResult{NextState: state}, nil
 	}
 	state.RunStatus = domain.RunWaitingLLM
@@ -549,8 +549,4 @@ func reduceToolCallSucceeded(state domain.SessionState, event domain.Event) (Red
 		return ReduceResult{}, err
 	}
 	return ReduceResult{NextState: state, Actions: []domain.Action{action}}, nil
-}
-
-func isTerminalRunStatus(status domain.RunStatus) bool {
-	return status == domain.RunCompleted || status == domain.RunFailed || status == domain.RunCancelled
 }

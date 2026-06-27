@@ -2,11 +2,13 @@ package store
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
-
-	"github.com/sangjinsu/orbis/internal/tool"
 )
 
 // ToolCallRecord is the persisted state of a single tool call, keyed by its
@@ -32,8 +34,27 @@ type ToolCallStore interface {
 	SaveToolCall(ctx context.Context, record ToolCallRecord) error
 }
 
+var unsafeKeyChars = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
+
+// sanitizeKey converts an idempotency key into a filesystem-safe token for use
+// as a file name under data/tool_calls/. A short hash of the original key is
+// appended so that distinct keys never collide after sanitization.
+func sanitizeKey(key string) string {
+	cleaned := unsafeKeyChars.ReplaceAllString(key, "_")
+	cleaned = strings.Trim(cleaned, "._-")
+	if len(cleaned) > 180 {
+		cleaned = cleaned[:180]
+	}
+	sum := sha1.Sum([]byte(key))
+	suffix := hex.EncodeToString(sum[:6])
+	if cleaned == "" {
+		return suffix
+	}
+	return cleaned + "_" + suffix
+}
+
 func (s *FileStore) toolCallPath(idempotencyKey string) string {
-	return filepath.Join(s.root, "tool_calls", tool.SanitizeKey(idempotencyKey)+".json")
+	return filepath.Join(s.root, "tool_calls", sanitizeKey(idempotencyKey)+".json")
 }
 
 func (s *FileStore) LoadToolCall(ctx context.Context, idempotencyKey string) (ToolCallRecord, error) {

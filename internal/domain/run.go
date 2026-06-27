@@ -24,3 +24,9 @@ type RunState struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
+
+// IsTerminalRunStatus reports whether a run has reached a final state and can no
+// longer transition or dispatch new side effects.
+func IsTerminalRunStatus(status RunStatus) bool {
+	return status == RunCompleted || status == RunFailed || status == RunCancelled
+}

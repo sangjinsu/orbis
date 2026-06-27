@@ -268,7 +268,7 @@ func (s *RuntimeService) handleRunCancel(ctx context.Context, req protocol.Clien
 	if err != nil {
 		return nil, fmt.Errorf("load run: %w", err)
 	}
-	if !isTerminalRunStatus(run.Status) {
+	if !domain.IsTerminalRunStatus(run.Status) {
 		s.cancelRun(params.RunID)
 		event := domain.Event{
 			EventID:   params.RunID + ":cancelled",
@@ -465,10 +465,6 @@ func (s *RuntimeService) clearRun(runID string) {
 
 func isTerminalEvent(eventType domain.EventType) bool {
 	return eventType == domain.EventRunCompleted || eventType == domain.EventRunFailed || eventType == domain.EventRunCancelled
-}
-
-func isTerminalRunStatus(status domain.RunStatus) bool {
-	return status == domain.RunCompleted || status == domain.RunFailed || status == domain.RunCancelled
 }
 
 func (s *RuntimeService) laneFor(sessionID string) *orbisruntime.SessionLane {
