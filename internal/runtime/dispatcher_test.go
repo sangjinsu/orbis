@@ -101,17 +101,22 @@ func TestDispatcherRoutesFinalAnswerToRuntimeEvents(t *testing.T) {
 	}
 }
 
-func TestDispatcherRoutesToolActionToToolExecutor(t *testing.T) {
+func TestDispatcherRoutesToolActionToToolRunner(t *testing.T) {
 	sink := &recordingEventSink{}
-	executor := &fakeToolExecutor{result: json.RawMessage(`{"text":"hello"}`)}
+	runner := &fakeToolRunner{outcome: worker.ToolOutcome{
+		Status: worker.ToolOutcomeSucceeded,
+		Result: json.RawMessage(`{"text":"hello"}`),
+	}}
 	dispatcher := NewDispatcher(DispatcherConfig{
-		EventSink:    sink,
-		ToolExecutor: executor,
+		EventSink:  sink,
+		ToolRunner: runner,
 	})
 	payload, err := json.Marshal(DispatchToolCallPayload{
-		ToolCallID: "call_1",
-		Name:       "echo",
-		Args:       json.RawMessage(`{"text":"hello"}`),
+		ToolCallID:  "call_1",
+		Name:        "echo",
+		Args:        json.RawMessage(`{"text":"hello"}`),
+		Attempt:     1,
+		MaxAttempts: 2,
 	})
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)
@@ -121,7 +126,7 @@ func TestDispatcherRoutesToolActionToToolExecutor(t *testing.T) {
 		SessionID:      "session_1",
 		RunID:          "run_1",
 		Type:           domain.ActionDispatchToolCall,
-		IdempotencyKey: "run_1:tool:act_tool",
+		IdempotencyKey: "run_1:tool:call_1",
 		Payload:        payload,
 	}
 
@@ -129,8 +134,11 @@ func TestDispatcherRoutesToolActionToToolExecutor(t *testing.T) {
 		t.Fatalf("Dispatch() error = %v", err)
 	}
 
-	if executor.seenName != "echo" || string(executor.seenArgs) != `{"text":"hello"}` {
-		t.Fatalf("executor saw name=%q args=%s, want echo args", executor.seenName, executor.seenArgs)
+	if runner.seenReq.ToolName != "echo" || string(runner.seenReq.Args) != `{"text":"hello"}` {
+		t.Fatalf("runner saw name=%q args=%s, want echo args", runner.seenReq.ToolName, runner.seenReq.Args)
+	}
+	if runner.seenReq.IdempotencyKey != "run_1:tool:call_1" {
+		t.Fatalf("runner idempotency key = %q, want run_1:tool:call_1", runner.seenReq.IdempotencyKey)
 	}
 	if len(sink.events) != 2 {
 		t.Fatalf("events len = %d, want 2", len(sink.events))
@@ -138,12 +146,95 @@ func TestDispatcherRoutesToolActionToToolExecutor(t *testing.T) {
 	if sink.events[0].Type != domain.EventToolCallStarted || sink.events[1].Type != domain.EventToolCallSucceeded {
 		t.Fatalf("events = %q, %q; want ToolCallStarted, ToolCallSucceeded", sink.events[0].Type, sink.events[1].Type)
 	}
-	var result ToolCallResultPayload
+	var result ToolCallEventPayload
 	if err := json.Unmarshal(sink.events[1].Payload, &result); err != nil {
 		t.Fatalf("unmarshal tool result payload: %v", err)
 	}
 	if result.ToolCallID != "call_1" || result.Name != "echo" || string(result.Result) != `{"text":"hello"}` {
 		t.Fatalf("result = %#v result=%s, want echo result", result, result.Result)
+	}
+}
+
+func TestDispatcherToolRejectionEmitsRejectedOnly(t *testing.T) {
+	sink := &recordingEventSink{}
+	runner := &fakeToolRunner{outcome: worker.ToolOutcome{
+		Status:     worker.ToolOutcomeRejected,
+		ReasonCode: "toolset_not_allowed",
+		Error:      "denied",
+	}}
+	dispatcher := NewDispatcher(DispatcherConfig{EventSink: sink, ToolRunner: runner})
+	payload, _ := json.Marshal(DispatchToolCallPayload{ToolCallID: "call_1", Name: "mock.dangerous", Attempt: 1, MaxAttempts: 2})
+	action := domain.Action{
+		ActionID: "act_tool", SessionID: "session_1", RunID: "run_1",
+		Type: domain.ActionDispatchToolCall, IdempotencyKey: "run_1:tool:call_1", Payload: payload,
+	}
+
+	if err := dispatcher.Dispatch(context.Background(), action); err != nil {
+		t.Fatalf("Dispatch() error = %v", err)
+	}
+	if len(sink.events) != 2 {
+		t.Fatalf("events len = %d, want 2", len(sink.events))
+	}
+	if sink.events[1].Type != domain.EventToolCallRejected {
+		t.Fatalf("second event = %q, want ToolCallRejected (no RunFailed from dispatcher)", sink.events[1].Type)
+	}
+}
+
+func TestDispatcherToolFailureEmitsFailedWithRetryable(t *testing.T) {
+	sink := &recordingEventSink{}
+	runner := &fakeToolRunner{outcome: worker.ToolOutcome{
+		Status:     worker.ToolOutcomeFailed,
+		ReasonCode: "error",
+		Error:      "boom",
+		Retryable:  true,
+	}}
+	dispatcher := NewDispatcher(DispatcherConfig{EventSink: sink, ToolRunner: runner})
+	payload, _ := json.Marshal(DispatchToolCallPayload{ToolCallID: "call_1", Name: "mock.fail_once", Attempt: 1, MaxAttempts: 2})
+	action := domain.Action{
+		ActionID: "act_tool", SessionID: "session_1", RunID: "run_1",
+		Type: domain.ActionDispatchToolCall, IdempotencyKey: "run_1:tool:call_1", Payload: payload,
+	}
+
+	if err := dispatcher.Dispatch(context.Background(), action); err != nil {
+		t.Fatalf("Dispatch() error = %v", err)
+	}
+	if sink.events[len(sink.events)-1].Type != domain.EventToolCallFailed {
+		t.Fatalf("last event = %q, want ToolCallFailed", sink.events[len(sink.events)-1].Type)
+	}
+	var failed ToolCallEventPayload
+	if err := json.Unmarshal(sink.events[1].Payload, &failed); err != nil {
+		t.Fatalf("unmarshal failed payload: %v", err)
+	}
+	if !failed.Retryable || failed.Attempt != 1 || failed.MaxAttempts != 2 {
+		t.Fatalf("failed payload = %#v, want retryable attempt 1/2", failed)
+	}
+}
+
+func TestDispatcherScheduleTimerFiresTimerEvent(t *testing.T) {
+	sink := &recordingEventSink{}
+	dispatcher := NewDispatcher(DispatcherConfig{EventSink: sink})
+	payload, _ := json.Marshal(ScheduleTimerPayload{
+		Kind:     "tool_retry",
+		Delay:    0,
+		ToolCall: &DispatchToolCallPayload{ToolCallID: "call_1", Name: "echo", Attempt: 2, MaxAttempts: 2, IdempotencyKey: "run_1:tool:call_1"},
+	})
+	action := domain.Action{
+		ActionID: "act_retry", SessionID: "session_1", RunID: "run_1",
+		Type: domain.ActionScheduleTimer, IdempotencyKey: "run_1:ScheduleTimer:call_1:2", Payload: payload,
+	}
+
+	if err := dispatcher.Dispatch(context.Background(), action); err != nil {
+		t.Fatalf("Dispatch() error = %v", err)
+	}
+	if len(sink.events) != 1 || sink.events[0].Type != domain.EventTimerFired {
+		t.Fatalf("events = %#v, want one TimerFired", sink.events)
+	}
+	var fired TimerFiredPayload
+	if err := json.Unmarshal(sink.events[0].Payload, &fired); err != nil {
+		t.Fatalf("unmarshal timer payload: %v", err)
+	}
+	if fired.Kind != "tool_retry" || fired.ToolCall == nil || fired.ToolCall.Attempt != 2 {
+		t.Fatalf("fired payload = %#v, want tool_retry attempt 2", fired)
 	}
 }
 
@@ -202,21 +293,15 @@ type fakeLLMProvider struct {
 	seenInput    string
 }
 
-type fakeToolExecutor struct {
-	result   json.RawMessage
-	err      error
-	seenName string
-	seenArgs json.RawMessage
+type fakeToolRunner struct {
+	outcome worker.ToolOutcome
+	seenReq worker.ToolRequest
 }
 
-func (e *fakeToolExecutor) Execute(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
+func (r *fakeToolRunner) Run(ctx context.Context, req worker.ToolRequest) worker.ToolOutcome {
 	_ = ctx
-	e.seenName = name
-	e.seenArgs = args
-	if e.err != nil {
-		return nil, e.err
-	}
-	return e.result, nil
+	r.seenReq = req
+	return r.outcome
 }
 
 func (p *fakeLLMProvider) Complete(ctx context.Context, req worker.LLMRequest) (worker.LLMResponse, error) {

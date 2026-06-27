@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/sangjinsu/orbis/internal/tool"
 )
 
 type LLMProvider interface {
@@ -16,9 +18,24 @@ type LLMProvider interface {
 	Stream(ctx context.Context, req LLMRequest) (<-chan LLMStreamEvent, error)
 }
 
+// LLMMessage is a provider-neutral conversation turn. Tool turns carry the
+// linkage fields so a provider can reconstruct function_call /
+// function_call_output items.
+type LLMMessage struct {
+	Role       string          `json:"role"`
+	Content    string          `json:"content,omitempty"`
+	ToolCallID string          `json:"tool_call_id,omitempty"`
+	ToolName   string          `json:"tool_name,omitempty"`
+	ToolArgs   json.RawMessage `json:"tool_args,omitempty"`
+}
+
 type LLMRequest struct {
 	Input        string
 	Instructions string
+	// Messages is the full conversation context. When present a provider should
+	// prefer it over Input. Tools advertises the callable tool schemas.
+	Messages []LLMMessage
+	Tools    []tool.ToolSchema
 }
 
 type LLMResponse struct {
