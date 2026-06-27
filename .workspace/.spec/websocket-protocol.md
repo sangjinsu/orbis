@@ -54,6 +54,32 @@ Define the minimal request, response, and event envelopes for v0.1 runtime testi
 - `session.message`
 - `session.subscribe`
 
+## Smoke Test
+
+The CLI smoke client uses the configured `.env` address and sends a real
+`session.message` request through the WebSocket gateway:
+
+```bash
+go run ./cmd/orbis ws smoke
+```
+
+Expected event sequence for the successful LLM path:
+
+```text
+UserMessageReceived
+LLMCallStarted
+LLMResponseReceived
+FinalAnswerEmitted
+RunCompleted
+```
+
+For provider failures, the terminal sequence must include:
+
+```text
+LLMCallFailed
+RunFailed
+```
+
 ## Remaining Methods
 
 - `session.create`

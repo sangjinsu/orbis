@@ -32,9 +32,12 @@ type RuntimeService struct {
 
 	mu          sync.Mutex
 	lanes       map[string]*orbisruntime.SessionLane
+	eventQueues map[string]chan domain.Event
 	dispatcher  *orbisruntime.Dispatcher
 	llmProvider worker.LLMProvider
 }
+
+const sessionEventQueueSize = 128
 
 type sessionMessageParams struct {
 	SessionID string `json:"session_id"`
@@ -51,6 +54,7 @@ func NewRuntimeService(cfg RuntimeServiceConfig) *RuntimeService {
 		broker:      cfg.Broker,
 		now:         now,
 		lanes:       map[string]*orbisruntime.SessionLane{},
+		eventQueues: map[string]chan domain.Event{},
 		llmProvider: cfg.LLMProvider,
 	}
 	service.dispatcher = orbisruntime.NewDispatcher(orbisruntime.DispatcherConfig{
@@ -71,10 +75,19 @@ func (s *RuntimeService) HandleClientRequest(ctx context.Context, req protocol.C
 }
 
 func (s *RuntimeService) Enqueue(ctx context.Context, event domain.Event) error {
-	go func() {
-		_ = s.handleEvent(ctx, event)
-	}()
-	return nil
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if event.SessionID == "" {
+		return fmt.Errorf("event session_id is required")
+	}
+	queue := s.eventQueueFor(event.SessionID)
+	select {
+	case queue <- event:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *RuntimeService) handleSessionMessage(ctx context.Context, req protocol.ClientRequest) (protocol.AckPayload, error) {
@@ -123,17 +136,33 @@ func (s *RuntimeService) handleSessionMessage(ctx context.Context, req protocol.
 		CreatedAt: now,
 		Payload:   payload,
 	}
-	go func() {
-		_ = s.handleEvent(context.Background(), event)
-	}()
+	if err := s.Enqueue(ctx, event); err != nil {
+		return protocol.AckPayload{}, fmt.Errorf("enqueue user message event: %w", err)
+	}
 
 	return protocol.AckPayload{SessionID: params.SessionID, RunID: runID}, nil
 }
 
 func (s *RuntimeService) handleEvent(ctx context.Context, event domain.Event) error {
+	event, err := s.prepareEvent(ctx, event)
+	if err != nil {
+		return err
+	}
 	s.publish(event)
 	lane := s.laneFor(event.SessionID)
 	return lane.Handle(ctx, event)
+}
+
+func (s *RuntimeService) prepareEvent(ctx context.Context, event domain.Event) (domain.Event, error) {
+	if event.Seq != 0 {
+		return event, nil
+	}
+	state, err := s.store.LoadSession(ctx, event.SessionID)
+	if err != nil {
+		return domain.Event{}, fmt.Errorf("load session for event seq: %w", err)
+	}
+	event.Seq = state.LastEventSeq + 1
+	return event, nil
 }
 
 func (s *RuntimeService) publish(event domain.Event) {
@@ -164,4 +193,22 @@ func (s *RuntimeService) laneFor(sessionID string) *orbisruntime.SessionLane {
 	})
 	s.lanes[sessionID] = lane
 	return lane
+}
+
+func (s *RuntimeService) eventQueueFor(sessionID string) chan domain.Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if queue, ok := s.eventQueues[sessionID]; ok {
+		return queue
+	}
+	queue := make(chan domain.Event, sessionEventQueueSize)
+	s.eventQueues[sessionID] = queue
+	go s.runSessionEventQueue(queue)
+	return queue
+}
+
+func (s *RuntimeService) runSessionEventQueue(events <-chan domain.Event) {
+	for event := range events {
+		_ = s.handleEvent(context.Background(), event)
+	}
 }

@@ -67,7 +67,11 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request, runtime Runtime, br
 	}()
 
 	for {
-		readCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		readCtx := context.Background()
+		cancel := func() {}
+		if timeout := defaultReadTimeout(); timeout > 0 {
+			readCtx, cancel = context.WithTimeout(context.Background(), timeout)
+		}
 		var req protocol.ClientRequest
 		err := wsjson.Read(readCtx, conn, &req)
 		cancel()
@@ -109,6 +113,10 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request, runtime Runtime, br
 			Payload: payload,
 		})
 	}
+}
+
+func defaultReadTimeout() time.Duration {
+	return 0
 }
 
 type subscribeParams struct {

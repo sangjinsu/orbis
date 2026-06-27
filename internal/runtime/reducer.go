@@ -29,6 +29,10 @@ type LLMResponsePayload struct {
 	ProviderResponseID string `json:"provider_response_id"`
 }
 
+type FailurePayload struct {
+	Error string `json:"error"`
+}
+
 type FinalAnswerPayload struct {
 	Text               string `json:"text"`
 	ProviderResponseID string `json:"provider_response_id"`
@@ -54,12 +58,33 @@ func (Reducer) Apply(ctx context.Context, state domain.SessionState, event domai
 		return reduceUserMessage(next, event)
 	case domain.EventLLMResponseReceived:
 		return reduceLLMResponse(next, event)
+	case domain.EventLLMCallFailed:
+		return reduceFailure(next, event)
+	case domain.EventFinalAnswerEmitted:
+		return ReduceResult{NextState: next}, nil
+	case domain.EventRunCompleted:
+		next.RunStatus = domain.RunCompleted
+		return ReduceResult{NextState: next}, nil
+	case domain.EventRunFailed:
+		next.RunStatus = domain.RunFailed
+		return ReduceResult{NextState: next}, nil
 	case domain.EventRunCancelled:
 		next.RunStatus = domain.RunCancelled
 		return ReduceResult{NextState: next}, nil
 	default:
 		return ReduceResult{NextState: next}, nil
 	}
+}
+
+func reduceFailure(state domain.SessionState, event domain.Event) (ReduceResult, error) {
+	var payload FailurePayload
+	if len(event.Payload) > 0 {
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return ReduceResult{}, fmt.Errorf("decode failure payload: %w", err)
+		}
+	}
+	state.RunStatus = domain.RunFailed
+	return ReduceResult{NextState: state}, nil
 }
 
 func reduceUserMessage(state domain.SessionState, event domain.Event) (ReduceResult, error) {

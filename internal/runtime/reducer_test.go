@@ -139,3 +139,76 @@ func TestReducerCancellationPreventsNewSideEffects(t *testing.T) {
 		t.Fatalf("actions len = %d, want 0", len(result.Actions))
 	}
 }
+
+func TestReducerLLMCallFailedMarksRunFailed(t *testing.T) {
+	reducer := Reducer{}
+	now := time.Unix(1700000000, 0).UTC()
+	state := domain.SessionState{
+		SessionID:    "session_1",
+		CurrentRunID: "run_1",
+		RunStatus:    domain.RunWaitingLLM,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	event := domain.Event{
+		EventID:   "evt_failed",
+		SessionID: "session_1",
+		RunID:     "run_1",
+		Type:      domain.EventLLMCallFailed,
+		Seq:       3,
+		CreatedAt: now,
+		Payload:   json.RawMessage(`{"error":"provider timeout"}`),
+	}
+
+	result, err := reducer.Apply(context.Background(), state, event)
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	if result.NextState.RunStatus != domain.RunFailed {
+		t.Fatalf("RunStatus = %q, want %q", result.NextState.RunStatus, domain.RunFailed)
+	}
+	if len(result.Actions) != 0 {
+		t.Fatalf("actions len = %d, want 0", len(result.Actions))
+	}
+}
+
+func TestReducerRunCompletedAndRunFailedEventsAreIdempotent(t *testing.T) {
+	reducer := Reducer{}
+	now := time.Unix(1700000000, 0).UTC()
+	for _, tc := range []struct {
+		name string
+		typ  domain.EventType
+		want domain.RunStatus
+	}{
+		{name: "completed", typ: domain.EventRunCompleted, want: domain.RunCompleted},
+		{name: "failed", typ: domain.EventRunFailed, want: domain.RunFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := domain.SessionState{
+				SessionID:    "session_1",
+				CurrentRunID: "run_1",
+				RunStatus:    domain.RunWaitingLLM,
+				CreatedAt:    now,
+				UpdatedAt:    now,
+			}
+			event := domain.Event{
+				EventID:   "evt_" + tc.name,
+				SessionID: "session_1",
+				RunID:     "run_1",
+				Type:      tc.typ,
+				Seq:       4,
+				CreatedAt: now,
+				Payload:   json.RawMessage(`{}`),
+			}
+
+			result, err := reducer.Apply(context.Background(), state, event)
+			if err != nil {
+				t.Fatalf("Apply() error = %v", err)
+			}
+			if result.NextState.RunStatus != tc.want {
+				t.Fatalf("RunStatus = %q, want %q", result.NextState.RunStatus, tc.want)
+			}
+		})
+	}
+}

@@ -20,3 +20,9 @@ func TestHTTPHealthEndpoints(t *testing.T) {
 		}
 	}
 }
+
+func TestDefaultReadTimeoutDisabledForLongRunningSubscriptions(t *testing.T) {
+	if got := defaultReadTimeout(); got != 0 {
+		t.Fatalf("defaultReadTimeout() = %v, want 0 for long-running subscriptions", got)
+	}
+}

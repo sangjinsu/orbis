@@ -45,6 +45,8 @@ func (d *Dispatcher) Dispatch(ctx context.Context, action domain.Action) error {
 	switch action.Type {
 	case domain.ActionDispatchLLMCall:
 		return d.dispatchLLMCall(ctx, action)
+	case domain.ActionEmitFinalAnswer:
+		return d.dispatchFinalAnswer(ctx, action)
 	default:
 		return nil
 	}
@@ -79,11 +81,21 @@ func (d *Dispatcher) dispatchLLMCall(ctx context.Context, action domain.Action) 
 		if marshalErr != nil {
 			return marshalErr
 		}
-		return d.eventSink.Enqueue(ctx, domain.Event{
+		if err := d.eventSink.Enqueue(ctx, domain.Event{
 			EventID:   action.ActionID + ":failed",
 			SessionID: action.SessionID,
 			RunID:     action.RunID,
 			Type:      domain.EventLLMCallFailed,
+			CreatedAt: d.now(),
+			Payload:   failurePayload,
+		}); err != nil {
+			return err
+		}
+		return d.eventSink.Enqueue(ctx, domain.Event{
+			EventID:   action.RunID + ":failed",
+			SessionID: action.SessionID,
+			RunID:     action.RunID,
+			Type:      domain.EventRunFailed,
 			CreatedAt: d.now(),
 			Payload:   failurePayload,
 		})
@@ -103,5 +115,37 @@ func (d *Dispatcher) dispatchLLMCall(ctx context.Context, action domain.Action) 
 		Type:      domain.EventLLMResponseReceived,
 		CreatedAt: d.now(),
 		Payload:   resultPayload,
+	})
+}
+
+func (d *Dispatcher) dispatchFinalAnswer(ctx context.Context, action domain.Action) error {
+	if d.eventSink == nil {
+		return fmt.Errorf("event sink is required")
+	}
+	var payload FinalAnswerPayload
+	if err := json.Unmarshal(action.Payload, &payload); err != nil {
+		return fmt.Errorf("decode final answer payload: %w", err)
+	}
+	finalPayload, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal final answer event: %w", err)
+	}
+	if err := d.eventSink.Enqueue(ctx, domain.Event{
+		EventID:   action.ActionID + ":emitted",
+		SessionID: action.SessionID,
+		RunID:     action.RunID,
+		Type:      domain.EventFinalAnswerEmitted,
+		CreatedAt: d.now(),
+		Payload:   finalPayload,
+	}); err != nil {
+		return err
+	}
+	return d.eventSink.Enqueue(ctx, domain.Event{
+		EventID:   action.RunID + ":completed",
+		SessionID: action.SessionID,
+		RunID:     action.RunID,
+		Type:      domain.EventRunCompleted,
+		CreatedAt: d.now(),
+		Payload:   json.RawMessage(`{}`),
 	})
 }
