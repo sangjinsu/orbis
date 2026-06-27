@@ -1,11 +1,19 @@
 package domain
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type Message struct {
 	Role      string    `json:"role"`
 	Content   string    `json:"content"`
 	CreatedAt time.Time `json:"created_at"`
+	// Tool linkage, set when a message participates in a tool call so the LLM
+	// context builder can reconstruct function_call / function_call_output turns.
+	ToolCallID string          `json:"tool_call_id,omitempty"`
+	ToolName   string          `json:"tool_name,omitempty"`
+	ToolArgs   json.RawMessage `json:"tool_args,omitempty"`
 }
 
 type SessionState struct {
