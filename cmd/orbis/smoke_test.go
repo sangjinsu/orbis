@@ -18,6 +18,7 @@ func TestRunWSSmokeSucceedsOnRunCompleted(t *testing.T) {
 	server := newSmokeServer(t, []protocol.RuntimeEvent{
 		{Type: "event", Event: "UserMessageReceived", SessionID: "session_smoke", RunID: "run_smoke", Payload: json.RawMessage(`{}`)},
 		{Type: "event", Event: "LLMCallStarted", SessionID: "session_smoke", RunID: "run_smoke", Payload: json.RawMessage(`{}`)},
+		{Type: "event", Event: "AssistantDelta", SessionID: "session_smoke", RunID: "run_smoke", Payload: json.RawMessage(`{"delta":"ok"}`)},
 		{Type: "event", Event: "RunCompleted", SessionID: "session_smoke", RunID: "run_smoke", Payload: json.RawMessage(`{}`)},
 	})
 	defer server.Close()

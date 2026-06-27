@@ -13,11 +13,15 @@ import (
 )
 
 func TestWebSocketSessionMessageReturnsImmediateAck(t *testing.T) {
+	responsePayload, err := json.Marshal(protocol.AckPayload{
+		SessionID: "session_1",
+		RunID:     "run_1",
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
 	runtime := &recordingRuntime{
-		ack: protocol.AckPayload{
-			SessionID: "session_1",
-			RunID:     "run_1",
-		},
+		payload: responsePayload,
 	}
 	server := httptest.NewServer(NewHTTPHandler(runtime))
 	defer server.Close()
@@ -110,14 +114,14 @@ func TestWebSocketSubscribeReceivesRuntimeEvents(t *testing.T) {
 }
 
 type recordingRuntime struct {
-	seen protocol.ClientRequest
-	ack  protocol.AckPayload
+	seen    protocol.ClientRequest
+	payload json.RawMessage
 }
 
-func (r *recordingRuntime) HandleClientRequest(ctx context.Context, req protocol.ClientRequest) (protocol.AckPayload, error) {
+func (r *recordingRuntime) HandleClientRequest(ctx context.Context, req protocol.ClientRequest) (json.RawMessage, error) {
 	_ = ctx
 	r.seen = req
-	return r.ack, nil
+	return r.payload, nil
 }
 
 type recordingBroker struct {

@@ -1,6 +1,10 @@
 package protocol
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/sangjinsu/orbis/internal/domain"
+)
 
 type ClientRequest struct {
 	Type   string          `json:"type"`
@@ -29,4 +33,18 @@ type RuntimeEvent struct {
 type AckPayload struct {
 	SessionID string `json:"session_id"`
 	RunID     string `json:"run_id"`
+}
+
+type SessionPayload struct {
+	SessionID string `json:"session_id"`
+}
+
+type RunStatusPayload struct {
+	RunID     string           `json:"run_id"`
+	SessionID string           `json:"session_id"`
+	Status    domain.RunStatus `json:"status"`
+}
+
+type EventsListPayload struct {
+	Events []RuntimeEvent `json:"events"`
 }

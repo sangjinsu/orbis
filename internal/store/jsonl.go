@@ -1,8 +1,10 @@
 package store
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -44,6 +46,41 @@ func (s *FileStore) AppendEvent(ctx context.Context, event domain.Event) error {
 		return fmt.Errorf("append event: %w", err)
 	}
 	return nil
+}
+
+func (s *FileStore) ListEvents(ctx context.Context, sessionID string, opts ListEventsOptions) ([]domain.Event, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(s.root, "events", sessionID+".jsonl")
+	file, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("%w: event log %s", ErrNotFound, sessionID)
+		}
+		return nil, fmt.Errorf("open event log: %w", err)
+	}
+	defer file.Close()
+
+	events := []domain.Event{}
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var event domain.Event
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			return nil, fmt.Errorf("decode event log line: %w", err)
+		}
+		if event.Seq <= opts.AfterSeq {
+			continue
+		}
+		events = append(events, event)
+		if opts.Limit > 0 && len(events) >= opts.Limit {
+			break
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan event log: %w", err)
+	}
+	return events, nil
 }
 
 func (s *FileStore) LoadSession(ctx context.Context, sessionID string) (domain.SessionState, error) {
@@ -99,6 +136,9 @@ func writeJSON(path string, value any) error {
 func readJSON(path string, target any) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%w: %s", ErrNotFound, path)
+		}
 		return fmt.Errorf("read snapshot: %w", err)
 	}
 	if err := json.Unmarshal(data, target); err != nil {

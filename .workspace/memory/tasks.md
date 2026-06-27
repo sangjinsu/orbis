@@ -13,16 +13,19 @@
 - PR #9: WebSocket gateway
 - PR #10: app server runtime wiring
 - PR #11: WebSocket event broker
-- current: real LLM WebSocket smoke hardening
+- PR #14: real LLM WebSocket smoke hardening
   - added `orbis ws smoke` for `.env`-configured WebSocket smoke testing
   - terminal runtime events now include `FinalAnswerEmitted`/`RunCompleted` or `LLMCallFailed`/`RunFailed`
   - app runtime uses a per-session event queue to preserve publish and reducer ordering
+- current: v0.1 remaining runtime kernel hardening
+  - LLM actions dispatch outside the session lane and stream `AssistantDelta`
+  - `session.create`, `run.status`, `events.list`, and `run.cancel` are implemented
+  - JSONL event replay is available through the store and WebSocket protocol
+  - run timeout emits `TimerFired` and closes the run as `FAILED`
+  - mock tool calls run through `DispatchToolCall`, `ToolCallStarted`, and `ToolCallSucceeded`
+  - `RunStarted` and `RunStatusChanged` are emitted for user-message run start visibility
 
 ## Remaining v0.1 Work
 
-- add tool worker and tool-call reducer path
-- add timer worker and timeout/cancel wiring
-- implement `run.status`, `run.cancel`, `events.list`, and `session.create`
-- add replay from JSONL event logs
-- expand manual WebSocket client documentation beyond the smoke CLI
 - keep real OpenAI `.env` WebSocket smoke as a release gate
+- decide whether tool failure retry policy stays post-v0.1

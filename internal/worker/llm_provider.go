@@ -24,12 +24,21 @@ type LLMRequest struct {
 type LLMResponse struct {
 	Text               string
 	ProviderResponseID string
+	ToolCall           *ToolCall
+}
+
+type ToolCall struct {
+	ToolCallID string          `json:"tool_call_id"`
+	Name       string          `json:"name"`
+	Args       json.RawMessage `json:"args"`
 }
 
 type LLMStreamEvent struct {
-	Delta string
-	Done  bool
-	Err   error
+	Delta              string
+	ProviderResponseID string
+	ToolCall           *ToolCall
+	Done               bool
+	Err                error
 }
 
 type OpenAIProviderConfig struct {
@@ -120,8 +129,8 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req LLMRequest) (<-chan LLM
 		return nil, err
 	}
 	ch := make(chan LLMStreamEvent, 2)
-	ch <- LLMStreamEvent{Delta: resp.Text}
-	ch <- LLMStreamEvent{Done: true}
+	ch <- LLMStreamEvent{Delta: resp.Text, ProviderResponseID: resp.ProviderResponseID}
+	ch <- LLMStreamEvent{Done: true, ProviderResponseID: resp.ProviderResponseID}
 	close(ch)
 	return ch, nil
 }

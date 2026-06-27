@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -13,6 +14,7 @@ type Config struct {
 	DataDir       string
 	LLMProvider   string
 	LLMModel      string
+	RunTimeout    time.Duration
 	OpenAIAPIKey  string
 	OpenAIBaseURL string
 }
@@ -38,11 +40,17 @@ func Load(path string) (Config, error) {
 		values[key] = value
 	}
 
+	runTimeout, err := parseDurationValue(values["ORBIS_RUN_TIMEOUT"])
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
 		Addr:          valueOrDefault(values, "ORBIS_ADDR", ":8080"),
 		DataDir:       valueOrDefault(values, "ORBIS_DATA_DIR", "data"),
 		LLMProvider:   valueOrDefault(values, "ORBIS_LLM_PROVIDER", "openai"),
 		LLMModel:      values["ORBIS_LLM_MODEL"],
+		RunTimeout:    runTimeout,
 		OpenAIAPIKey:  values["OPENAI_API_KEY"],
 		OpenAIBaseURL: valueOrDefault(values, "OPENAI_BASE_URL", "https://api.openai.com"),
 	}
@@ -115,4 +123,16 @@ func valueOrDefault(values map[string]string, key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func parseDurationValue(value string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, nil
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse ORBIS_RUN_TIMEOUT: %w", err)
+	}
+	return duration, nil
 }
