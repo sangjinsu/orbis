@@ -18,6 +18,10 @@ func NewFileStore(root string) *FileStore {
 	return &FileStore{root: root}
 }
 
+func (s *FileStore) Root() string {
+	return s.root
+}
+
 func (s *FileStore) AppendEvent(ctx context.Context, event domain.Event) error {
 	if err := ctx.Err(); err != nil {
 		return err

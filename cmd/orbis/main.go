@@ -1,10 +1,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 
+	"github.com/sangjinsu/orbis/internal/app"
 	"github.com/sangjinsu/orbis/internal/config"
 )
 
@@ -21,7 +24,12 @@ func main() {
 			slog.Error("load config", "error", err)
 			os.Exit(1)
 		}
-		slog.Info("orbis server bootstrap", "addr", cfg.Addr, "data_dir", cfg.DataDir, "llm_provider", cfg.LLMProvider, "llm_model", cfg.LLMModel)
+		server := app.NewHTTPServer(cfg)
+		slog.Info("orbis server starting", "addr", cfg.Addr, "data_dir", cfg.DataDir, "llm_provider", cfg.LLMProvider, "llm_model", cfg.LLMModel)
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("server stopped", "error", err)
+			os.Exit(1)
+		}
 	default:
 		printUsage()
 		os.Exit(2)
