@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sangjinsu/orbis/internal/broker"
 	"github.com/sangjinsu/orbis/internal/domain"
 	"github.com/sangjinsu/orbis/internal/protocol"
 	"github.com/sangjinsu/orbis/internal/store"
@@ -55,6 +56,48 @@ func TestRuntimeServiceHandlesSessionMessageAsBackgroundEvent(t *testing.T) {
 	eventPath := filepath.Join(fileStore.Root(), "events", "session_1.jsonl")
 	if _, err := os.Stat(eventPath); err != nil {
 		t.Fatalf("event log was not written: %v", err)
+	}
+}
+
+func TestRuntimeServicePublishesProgressEvents(t *testing.T) {
+	ctx := context.Background()
+	fileStore := store.NewFileStore(t.TempDir())
+	eventBroker := broker.New()
+	events, unsubscribe := eventBroker.Subscribe(ctx, "session_1")
+	defer unsubscribe()
+	service := NewRuntimeService(RuntimeServiceConfig{
+		Store:  fileStore,
+		Broker: eventBroker,
+		LLMProvider: &fakeProvider{
+			response: worker.LLMResponse{Text: "안녕하세요", ProviderResponseID: "resp_1"},
+		},
+		Now: func() time.Time {
+			return time.Unix(1700000000, 0).UTC()
+		},
+	})
+
+	_, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
+		Type:   "req",
+		ID:     "req_1",
+		Method: "session.message",
+		Params: json.RawMessage(`{"session_id":"session_1","text":"안녕"}`),
+	})
+	if err != nil {
+		t.Fatalf("HandleClientRequest() error = %v", err)
+	}
+
+	var seen []string
+	waitFor(t, func() bool {
+		select {
+		case event := <-events:
+			seen = append(seen, event.Event)
+			return len(seen) >= 3
+		default:
+			return false
+		}
+	})
+	if seen[0] != string(domain.EventUserMessageReceived) {
+		t.Fatalf("first event = %q, want %q", seen[0], domain.EventUserMessageReceived)
 	}
 }
 
