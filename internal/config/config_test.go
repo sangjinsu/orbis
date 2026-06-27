@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadUsesDotEnvValues(t *testing.T) {
@@ -16,6 +17,7 @@ ORBIS_ADDR=:8081
 ORBIS_DATA_DIR=tmp-data
 ORBIS_LLM_PROVIDER=openai
 ORBIS_LLM_MODEL=gpt-test
+ORBIS_RUN_TIMEOUT=250ms
 OPENAI_API_KEY=test-key
 OPENAI_BASE_URL=https://api.openai.test
 `)
@@ -45,6 +47,9 @@ OPENAI_BASE_URL=https://api.openai.test
 	}
 	if cfg.OpenAIBaseURL != "https://api.openai.test" {
 		t.Fatalf("OpenAIBaseURL = %q, want %q", cfg.OpenAIBaseURL, "https://api.openai.test")
+	}
+	if cfg.RunTimeout != 250*time.Millisecond {
+		t.Fatalf("RunTimeout = %v, want 250ms", cfg.RunTimeout)
 	}
 }
 

@@ -19,9 +19,11 @@ func NewHTTPServer(cfg config.Config) *http.Server {
 		Model:   cfg.LLMModel,
 	})
 	runtime := NewRuntimeService(RuntimeServiceConfig{
-		Store:       fileStore,
-		Broker:      eventBroker,
-		LLMProvider: provider,
+		Store:        fileStore,
+		Broker:       eventBroker,
+		LLMProvider:  provider,
+		ToolExecutor: worker.NewMockToolRegistry(nil),
+		RunTimeout:   cfg.RunTimeout,
 	})
 	return &http.Server{
 		Addr:    cfg.Addr,

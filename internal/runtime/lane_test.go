@@ -7,17 +7,16 @@ import (
 	"time"
 
 	"github.com/sangjinsu/orbis/internal/domain"
+	"github.com/sangjinsu/orbis/internal/store"
 )
 
 func TestSessionLaneAppliesEventsInOrderAndDispatchesActions(t *testing.T) {
 	ctx := context.Background()
 	store := &recordingStore{}
-	dispatcher := &recordingDispatcher{}
 	lane := NewSessionLane(SessionLaneConfig{
-		SessionID:  "session_1",
-		Reducer:    Reducer{},
-		Store:      store,
-		Dispatcher: dispatcher,
+		SessionID: "session_1",
+		Reducer:   Reducer{},
+		Store:     store,
 	})
 	now := time.Unix(1700000000, 0).UTC()
 
@@ -40,10 +39,12 @@ func TestSessionLaneAppliesEventsInOrderAndDispatchesActions(t *testing.T) {
 		Payload:   json.RawMessage(`{"text":"hi","provider_response_id":"resp_1"}`),
 	}
 
-	if err := lane.Handle(ctx, first); err != nil {
+	firstResult, err := lane.Handle(ctx, first)
+	if err != nil {
 		t.Fatalf("Handle(first) error = %v", err)
 	}
-	if err := lane.Handle(ctx, second); err != nil {
+	secondResult, err := lane.Handle(ctx, second)
+	if err != nil {
 		t.Fatalf("Handle(second) error = %v", err)
 	}
 
@@ -56,11 +57,12 @@ func TestSessionLaneAppliesEventsInOrderAndDispatchesActions(t *testing.T) {
 	if store.session.RunStatus != domain.RunCompleted {
 		t.Fatalf("stored RunStatus = %q, want %q", store.session.RunStatus, domain.RunCompleted)
 	}
-	if len(dispatcher.actions) != 2 {
-		t.Fatalf("dispatched actions len = %d, want 2", len(dispatcher.actions))
+	actions := append(firstResult.Actions, secondResult.Actions...)
+	if len(actions) != 2 {
+		t.Fatalf("actions len = %d, want 2", len(actions))
 	}
-	if dispatcher.actions[0].Type != domain.ActionDispatchLLMCall || dispatcher.actions[1].Type != domain.ActionEmitFinalAnswer {
-		t.Fatalf("dispatched action types = %q, %q", dispatcher.actions[0].Type, dispatcher.actions[1].Type)
+	if actions[0].Type != domain.ActionDispatchLLMCall || actions[1].Type != domain.ActionEmitFinalAnswer {
+		t.Fatalf("action types = %q, %q", actions[0].Type, actions[1].Type)
 	}
 }
 
@@ -74,6 +76,13 @@ func (s *recordingStore) AppendEvent(ctx context.Context, event domain.Event) er
 	_ = ctx
 	s.events = append(s.events, event)
 	return nil
+}
+
+func (s *recordingStore) ListEvents(ctx context.Context, sessionID string, opts store.ListEventsOptions) ([]domain.Event, error) {
+	_ = ctx
+	_ = sessionID
+	_ = opts
+	return s.events, nil
 }
 
 func (s *recordingStore) LoadSession(ctx context.Context, sessionID string) (domain.SessionState, error) {
@@ -101,15 +110,5 @@ func (s *recordingStore) LoadRun(ctx context.Context, runID string) (domain.RunS
 func (s *recordingStore) SaveRun(ctx context.Context, state domain.RunState) error {
 	_ = ctx
 	s.run = state
-	return nil
-}
-
-type recordingDispatcher struct {
-	actions []domain.Action
-}
-
-func (d *recordingDispatcher) Dispatch(ctx context.Context, action domain.Action) error {
-	_ = ctx
-	d.actions = append(d.actions, action)
 	return nil
 }

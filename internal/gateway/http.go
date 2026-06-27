@@ -13,7 +13,7 @@ import (
 )
 
 type Runtime interface {
-	HandleClientRequest(ctx context.Context, req protocol.ClientRequest) (protocol.AckPayload, error)
+	HandleClientRequest(ctx context.Context, req protocol.ClientRequest) (json.RawMessage, error)
 }
 
 type Broker interface {
@@ -86,17 +86,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request, runtime Runtime, br
 			continue
 		}
 
-		ack, err := runtime.HandleClientRequest(context.Background(), req)
-		if err != nil {
-			writeResponse(conn, &writeMu, protocol.ServerResponse{
-				Type:  "res",
-				ID:    req.ID,
-				OK:    false,
-				Error: err.Error(),
-			})
-			continue
-		}
-		payload, err := json.Marshal(ack)
+		payload, err := runtime.HandleClientRequest(context.Background(), req)
 		if err != nil {
 			writeResponse(conn, &writeMu, protocol.ServerResponse{
 				Type:  "res",

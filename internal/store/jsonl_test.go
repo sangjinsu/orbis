@@ -73,3 +73,40 @@ func TestFileStoreAppendsEventsAndSavesSnapshots(t *testing.T) {
 		t.Fatalf("Run SessionID = %q, want session_1", loadedRun.SessionID)
 	}
 }
+
+func TestFileStoreListsEventsAfterSeqWithLimit(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store := NewFileStore(dir)
+	now := time.Unix(1700000000, 0).UTC()
+
+	for i, typ := range []domain.EventType{
+		domain.EventSessionCreated,
+		domain.EventUserMessageReceived,
+		domain.EventLLMCallStarted,
+	} {
+		event := domain.Event{
+			EventID:   "evt_" + string(typ),
+			SessionID: "session_1",
+			RunID:     "run_1",
+			Type:      typ,
+			Seq:       int64(i + 1),
+			CreatedAt: now.Add(time.Duration(i) * time.Second),
+			Payload:   json.RawMessage(`{}`),
+		}
+		if err := store.AppendEvent(ctx, event); err != nil {
+			t.Fatalf("AppendEvent(%d) error = %v", i, err)
+		}
+	}
+
+	events, err := store.ListEvents(ctx, "session_1", ListEventsOptions{AfterSeq: 1, Limit: 1})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events len = %d, want 1", len(events))
+	}
+	if events[0].Seq != 2 || events[0].Type != domain.EventUserMessageReceived {
+		t.Fatalf("event = %#v, want seq 2 UserMessageReceived", events[0])
+	}
+}
