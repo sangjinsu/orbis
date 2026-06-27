@@ -25,7 +25,20 @@
   - mock tool calls run through `DispatchToolCall`, `ToolCallStarted`, and `ToolCallSucceeded`
   - `RunStarted` and `RunStatusChanged` are emitted for user-message run start visibility
 
-## Remaining v0.1 Work
+## v0.1 Status
 
-- keep real OpenAI `.env` WebSocket smoke as a release gate
-- decide whether tool failure retry policy stays post-v0.1
+Completed on 2026-06-27.
+
+Fresh main-branch verification:
+
+- `go test ./...`
+- `go test -race ./...`
+- `git diff --check`
+- real OpenAI `.env` WebSocket smoke reached `RunCompleted`
+
+See `.workspace/memory/history.md` for the v0.1 completion record.
+
+## Post-v0.1 Follow-ups
+
+- decide and implement tool failure retry policy
+- collect real usage feedback before adopting OpenClaw/Hermes advanced features
