@@ -171,6 +171,32 @@ Use:
 
 ---
 
+## Architecture Direction
+
+Orbis adopts a modular monolith architecture.
+
+Keep the runtime as one deployable Go process for v0.1, while separating package responsibilities clearly:
+
+- `internal/domain` owns stable runtime types.
+- `internal/runtime` owns reducer, lane, dispatcher, and loop coordination.
+- `internal/worker` owns side-effect execution such as LLM, tool, and timer workers.
+- `internal/gateway` owns HTTP and WebSocket boundaries.
+- `internal/store` owns persistence interfaces and file-based implementations.
+- `internal/protocol` owns wire DTOs when they diverge from domain types.
+
+Do not split into microservices, distributed workers, external brokers, or separate deployables before the v0.1 kernel is stable.
+
+---
+
+## GitHub Pull Request Conventions
+
+All PR bodies must be written in Korean.
+
+Use `.github/pull_request_template.md` for every PR body.
+Keep command output and error text in their original language when needed, but write summaries, rationale, risk notes, and validation explanations in Korean.
+
+---
+
 ## Current Scope: v0.1
 
 The first version must focus only on the runtime kernel and WebSocket-based LLM testing.
