@@ -20,6 +20,9 @@ type wsSmokeConfig struct {
 	SessionID string
 	Text      string
 	Timeout   time.Duration
+	// RequireToolCall fails the smoke if the run completes without a successful
+	// tool call, proving the real LLM drove a tool through the runtime.
+	RequireToolCall bool
 }
 
 func runWSSmoke(ctx context.Context, cfg wsSmokeConfig, out io.Writer) error {
@@ -57,6 +60,7 @@ func runWSSmoke(ctx context.Context, cfg wsSmokeConfig, out io.Writer) error {
 	}
 
 	var firstFailureEvent string
+	var sawToolSucceeded bool
 	for {
 		var raw json.RawMessage
 		if err := wsjson.Read(ctx, conn, &raw); err != nil {
@@ -83,11 +87,16 @@ func runWSSmoke(ctx context.Context, cfg wsSmokeConfig, out io.Writer) error {
 		case "event":
 			fmt.Fprintf(out, "event:%s\n", header.Event)
 			switch header.Event {
+			case string(domain.EventToolCallSucceeded):
+				sawToolSucceeded = true
 			case string(domain.EventRunCompleted):
+				if cfg.RequireToolCall && !sawToolSucceeded {
+					return fmt.Errorf("run completed without a successful tool call")
+				}
 				return nil
 			case string(domain.EventRunFailed):
 				return fmt.Errorf("runtime event %s", header.Event)
-			case string(domain.EventLLMCallFailed):
+			case string(domain.EventLLMCallFailed), string(domain.EventToolCallRejected), string(domain.EventToolCallTimedOut):
 				if firstFailureEvent == "" {
 					firstFailureEvent = header.Event
 				}
@@ -124,5 +133,15 @@ func smokeConfigFromEnv(cfg config.Config) wsSmokeConfig {
 		SessionID: "session_smoke",
 		Text:      "Reply with exactly: orbis-runtime-ws-ok",
 		Timeout:   90 * time.Second,
+	}
+}
+
+func toolSmokeConfigFromEnv(cfg config.Config) wsSmokeConfig {
+	return wsSmokeConfig{
+		URL:             wsURLFromAddr(cfg.Addr),
+		SessionID:       "session_smoke_tool",
+		Text:            "Use the math.add tool to add 1 and 2, then reply with the numeric result.",
+		Timeout:         90 * time.Second,
+		RequireToolCall: true,
 	}
 }

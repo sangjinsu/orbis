@@ -63,6 +63,49 @@ func TestRunWSSmokeFailsOnRunFailed(t *testing.T) {
 	}
 }
 
+func TestRunWSSmokeToolSucceedsWhenToolCalled(t *testing.T) {
+	server := newSmokeServer(t, []protocol.RuntimeEvent{
+		{Type: "event", Event: "ToolCallStarted", SessionID: "session_smoke", RunID: "run_smoke", Payload: json.RawMessage(`{}`)},
+		{Type: "event", Event: "ToolCallSucceeded", SessionID: "session_smoke", RunID: "run_smoke", Payload: json.RawMessage(`{"result":{"result":3}}`)},
+		{Type: "event", Event: "RunCompleted", SessionID: "session_smoke", RunID: "run_smoke", Payload: json.RawMessage(`{}`)},
+	})
+	defer server.Close()
+
+	var out strings.Builder
+	err := runWSSmoke(context.Background(), wsSmokeConfig{
+		URL:             "ws" + strings.TrimPrefix(server.URL, "http") + "/ws",
+		SessionID:       "session_smoke",
+		Text:            "use the tool",
+		Timeout:         time.Second,
+		RequireToolCall: true,
+	}, &out)
+	if err != nil {
+		t.Fatalf("runWSSmoke() error = %v", err)
+	}
+	if !strings.Contains(out.String(), "ToolCallSucceeded") {
+		t.Fatalf("smoke output = %s, want ToolCallSucceeded", out.String())
+	}
+}
+
+func TestRunWSSmokeToolFailsWhenNoToolCall(t *testing.T) {
+	server := newSmokeServer(t, []protocol.RuntimeEvent{
+		{Type: "event", Event: "RunCompleted", SessionID: "session_smoke", RunID: "run_smoke", Payload: json.RawMessage(`{}`)},
+	})
+	defer server.Close()
+
+	var out strings.Builder
+	err := runWSSmoke(context.Background(), wsSmokeConfig{
+		URL:             "ws" + strings.TrimPrefix(server.URL, "http") + "/ws",
+		SessionID:       "session_smoke",
+		Text:            "use the tool",
+		Timeout:         time.Second,
+		RequireToolCall: true,
+	}, &out)
+	if err == nil {
+		t.Fatal("runWSSmoke() error = nil, want failure for missing tool call")
+	}
+}
+
 func TestWSURLFromAddr(t *testing.T) {
 	for _, tc := range []struct {
 		name string

@@ -92,8 +92,15 @@ func NewOpenAIProvider(cfg OpenAIProviderConfig) *OpenAIProvider {
 func (p *OpenAIProvider) Complete(ctx context.Context, req LLMRequest) (LLMResponse, error) {
 	body := map[string]any{
 		"model": p.model,
-		"input": req.Input,
 		"store": false,
+	}
+	if len(req.Messages) > 0 {
+		body["input"] = buildResponsesInput(req.Messages)
+	} else {
+		body["input"] = req.Input
+	}
+	if len(req.Tools) > 0 {
+		body["tools"] = buildResponsesTools(req.Tools)
 	}
 	if req.Instructions != "" {
 		body["instructions"] = req.Instructions
@@ -131,12 +138,14 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req LLMRequest) (LLMRespo
 	}
 
 	text := decoded.outputText()
-	if text == "" {
-		return LLMResponse{}, errors.New("response contained no output_text")
+	toolCall := decoded.functionCall()
+	if text == "" && toolCall == nil {
+		return LLMResponse{}, errors.New("response contained no output_text or tool call")
 	}
 	return LLMResponse{
 		Text:               text,
 		ProviderResponseID: decoded.ID,
+		ToolCall:           toolCall,
 	}, nil
 }
 
@@ -146,10 +155,66 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req LLMRequest) (<-chan LLM
 		return nil, err
 	}
 	ch := make(chan LLMStreamEvent, 2)
-	ch <- LLMStreamEvent{Delta: resp.Text, ProviderResponseID: resp.ProviderResponseID}
-	ch <- LLMStreamEvent{Done: true, ProviderResponseID: resp.ProviderResponseID}
+	if resp.Text != "" {
+		ch <- LLMStreamEvent{Delta: resp.Text, ProviderResponseID: resp.ProviderResponseID}
+	}
+	ch <- LLMStreamEvent{Done: true, ProviderResponseID: resp.ProviderResponseID, ToolCall: resp.ToolCall}
 	close(ch)
 	return ch, nil
+}
+
+// buildResponsesInput converts conversation messages into Responses API input
+// items, reconstructing assistant function_call turns and function_call_output
+// tool results from the message linkage fields.
+func buildResponsesInput(messages []LLMMessage) []map[string]any {
+	items := make([]map[string]any, 0, len(messages))
+	for _, m := range messages {
+		switch {
+		case m.Role == "tool" && m.ToolCallID != "":
+			items = append(items, map[string]any{
+				"type":    "function_call_output",
+				"call_id": m.ToolCallID,
+				"output":  m.Content,
+			})
+		case m.Role == "assistant" && m.ToolCallID != "":
+			args := strings.TrimSpace(string(m.ToolArgs))
+			if args == "" {
+				args = "{}"
+			}
+			items = append(items, map[string]any{
+				"type":      "function_call",
+				"call_id":   m.ToolCallID,
+				"name":      m.ToolName,
+				"arguments": args,
+			})
+		default:
+			role := m.Role
+			if role == "" {
+				role = "user"
+			}
+			items = append(items, map[string]any{"role": role, "content": m.Content})
+		}
+	}
+	return items
+}
+
+// buildResponsesTools maps tool schemas to flattened Responses API function
+// tool definitions ({"type":"function","name","description","parameters"}).
+func buildResponsesTools(tools []tool.ToolSchema) []map[string]any {
+	defs := make([]map[string]any, 0, len(tools))
+	for _, t := range tools {
+		parameters := t.Parameters
+		if len(parameters) == 0 {
+			parameters = json.RawMessage(`{"type":"object","properties":{}}`)
+		}
+		defs = append(defs, map[string]any{
+			"type":        "function",
+			"name":        t.Name,
+			"description": t.Description,
+			"parameters":  parameters,
+		})
+	}
+	return defs
 }
 
 type openAIResponse struct {
@@ -164,9 +229,12 @@ type openAIError struct {
 }
 
 type openAIOutputItem struct {
-	Type    string                `json:"type"`
-	Role    string                `json:"role"`
-	Content []openAIOutputContent `json:"content"`
+	Type      string                `json:"type"`
+	Role      string                `json:"role"`
+	Content   []openAIOutputContent `json:"content"`
+	CallID    string                `json:"call_id"`
+	Name      string                `json:"name"`
+	Arguments string                `json:"arguments"`
 }
 
 type openAIOutputContent struct {
@@ -187,4 +255,24 @@ func (r openAIResponse) outputText() string {
 		}
 	}
 	return b.String()
+}
+
+// functionCall returns the first function_call item in the response output, if
+// the model chose to call a tool.
+func (r openAIResponse) functionCall() *ToolCall {
+	for _, item := range r.Output {
+		if item.Type != "function_call" {
+			continue
+		}
+		args := strings.TrimSpace(item.Arguments)
+		if args == "" {
+			args = "{}"
+		}
+		return &ToolCall{
+			ToolCallID: item.CallID,
+			Name:       item.Name,
+			Args:       json.RawMessage(args),
+		}
+	}
+	return nil
 }
