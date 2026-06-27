@@ -184,25 +184,9 @@ func (d *Dispatcher) dispatchToolCall(ctx context.Context, action domain.Action)
 		attempt = 1
 	}
 
-	startedPayload, err := json.Marshal(ToolCallEventPayload{
-		ToolCallID:     payload.ToolCallID,
-		Name:           payload.Name,
-		Args:           payload.Args,
-		IdempotencyKey: action.IdempotencyKey,
-		Attempt:        attempt,
-		MaxAttempts:    payload.MaxAttempts,
-	})
-	if err != nil {
-		return fmt.Errorf("marshal tool started payload: %w", err)
-	}
-	if err := d.eventSink.Enqueue(ctx, domain.Event{
-		EventID:   action.ActionID + ":started",
-		SessionID: action.SessionID,
-		RunID:     action.RunID,
-		Type:      domain.EventToolCallStarted,
-		CreatedAt: d.now(),
-		Payload:   startedPayload,
-	}); err != nil {
+	started := d.baseToolEvent(action, payload, attempt)
+	started.Args = payload.Args
+	if err := d.emitToolEvent(ctx, action, domain.EventToolCallStarted, started, ":started"); err != nil {
 		return err
 	}
 
@@ -222,57 +206,49 @@ func (d *Dispatcher) dispatchToolCall(ctx context.Context, action domain.Action)
 	case worker.ToolOutcomeSucceeded:
 		return d.emitToolSucceeded(ctx, action, payload, attempt, outcome)
 	case worker.ToolOutcomeDeduplicated:
-		if err := d.emitToolEvent(ctx, action, domain.EventToolCallDeduplicated, ToolCallEventPayload{
-			ToolCallID:     payload.ToolCallID,
-			Name:           payload.Name,
-			IdempotencyKey: action.IdempotencyKey,
-			Attempt:        attempt,
-			MaxAttempts:    payload.MaxAttempts,
-			Result:         outcome.Result,
-		}, ":deduplicated"); err != nil {
+		dedup := d.baseToolEvent(action, payload, attempt)
+		dedup.Result = outcome.Result
+		if err := d.emitToolEvent(ctx, action, domain.EventToolCallDeduplicated, dedup, ":deduplicated"); err != nil {
 			return err
 		}
 		return d.emitToolSucceeded(ctx, action, payload, attempt, outcome)
 	case worker.ToolOutcomeRejected:
-		return d.emitToolEvent(ctx, action, domain.EventToolCallRejected, ToolCallEventPayload{
-			ToolCallID:     payload.ToolCallID,
-			Name:           payload.Name,
-			IdempotencyKey: action.IdempotencyKey,
-			Attempt:        attempt,
-			MaxAttempts:    payload.MaxAttempts,
-			ReasonCode:     outcome.ReasonCode,
-			Error:          outcome.Error,
-		}, ":rejected")
+		rejected := d.baseToolEvent(action, payload, attempt)
+		rejected.ReasonCode = outcome.ReasonCode
+		rejected.Error = outcome.Error
+		return d.emitToolEvent(ctx, action, domain.EventToolCallRejected, rejected, ":rejected")
 	default:
 		eventType := domain.EventToolCallFailed
 		if outcome.TimedOut {
 			eventType = domain.EventToolCallTimedOut
 		}
-		return d.emitToolEvent(ctx, action, eventType, ToolCallEventPayload{
-			ToolCallID:     payload.ToolCallID,
-			Name:           payload.Name,
-			Args:           payload.Args,
-			IdempotencyKey: action.IdempotencyKey,
-			Attempt:        attempt,
-			MaxAttempts:    payload.MaxAttempts,
-			DurationMS:     outcome.DurationMS,
-			Error:          outcome.Error,
-			ReasonCode:     outcome.ReasonCode,
-			Retryable:      outcome.Retryable,
-		}, ":failed")
+		failed := d.baseToolEvent(action, payload, attempt)
+		failed.Args = payload.Args
+		failed.DurationMS = outcome.DurationMS
+		failed.Error = outcome.Error
+		failed.ReasonCode = outcome.ReasonCode
+		failed.Retryable = outcome.Retryable
+		return d.emitToolEvent(ctx, action, eventType, failed, ":failed")
 	}
 }
 
-func (d *Dispatcher) emitToolSucceeded(ctx context.Context, action domain.Action, payload DispatchToolCallPayload, attempt int, outcome worker.ToolOutcome) error {
-	return d.emitToolEvent(ctx, action, domain.EventToolCallSucceeded, ToolCallEventPayload{
+// baseToolEvent builds the fields shared by every tool lifecycle event; callers
+// set the outcome-specific fields (result, error, reason_code, ...) before emit.
+func (d *Dispatcher) baseToolEvent(action domain.Action, payload DispatchToolCallPayload, attempt int) ToolCallEventPayload {
+	return ToolCallEventPayload{
 		ToolCallID:     payload.ToolCallID,
 		Name:           payload.Name,
 		IdempotencyKey: action.IdempotencyKey,
 		Attempt:        attempt,
 		MaxAttempts:    payload.MaxAttempts,
-		DurationMS:     outcome.DurationMS,
-		Result:         outcome.Result,
-	}, ":succeeded")
+	}
+}
+
+func (d *Dispatcher) emitToolSucceeded(ctx context.Context, action domain.Action, payload DispatchToolCallPayload, attempt int, outcome worker.ToolOutcome) error {
+	succeeded := d.baseToolEvent(action, payload, attempt)
+	succeeded.DurationMS = outcome.DurationMS
+	succeeded.Result = outcome.Result
+	return d.emitToolEvent(ctx, action, domain.EventToolCallSucceeded, succeeded, ":succeeded")
 }
 
 func (d *Dispatcher) emitToolEvent(ctx context.Context, action domain.Action, eventType domain.EventType, payload ToolCallEventPayload, suffix string) error {

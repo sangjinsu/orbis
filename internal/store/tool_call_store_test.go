@@ -8,6 +8,21 @@ import (
 	"time"
 )
 
+func TestSanitizeKeyIsStableAndCollisionResistant(t *testing.T) {
+	a := sanitizeKey("run_1:tool:call/abc")
+	b := sanitizeKey("run_1:tool:call/abc")
+	if a != b {
+		t.Fatalf("sanitizeKey not stable: %q vs %q", a, b)
+	}
+	c := sanitizeKey("run_1:tool:call_abc")
+	if a == c {
+		t.Fatal("distinct keys collided after sanitization")
+	}
+	if a == "" {
+		t.Fatal("sanitized key is empty")
+	}
+}
+
 func TestToolCallStoreRoundTrip(t *testing.T) {
 	s := NewFileStore(t.TempDir())
 	ctx := context.Background()

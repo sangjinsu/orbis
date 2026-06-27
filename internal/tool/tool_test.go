@@ -140,21 +140,6 @@ func TestRetryErrorRetryableFilter(t *testing.T) {
 	}
 }
 
-func TestSanitizeKeyIsStableAndCollisionResistant(t *testing.T) {
-	a := SanitizeKey("run_1:tool:call/abc")
-	b := SanitizeKey("run_1:tool:call/abc")
-	if a != b {
-		t.Fatalf("SanitizeKey not stable: %q vs %q", a, b)
-	}
-	c := SanitizeKey("run_1:tool:call_abc")
-	if a == c {
-		t.Fatal("distinct keys collided after sanitization")
-	}
-	if a == "" {
-		t.Fatal("sanitized key is empty")
-	}
-}
-
 func TestMockToolsExecute(t *testing.T) {
 	r := newTestRegistry(t)
 	ctx := context.Background()
