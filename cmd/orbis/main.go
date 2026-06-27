@@ -41,7 +41,11 @@ func main() {
 			slog.Error("load config", "error", err)
 			os.Exit(1)
 		}
-		if err := runWSSmoke(context.Background(), smokeConfigFromEnv(cfg), os.Stdout); err != nil {
+		smokeCfg := smokeConfigFromEnv(cfg)
+		if len(os.Args) >= 4 && os.Args[3] == "tool" {
+			smokeCfg = toolSmokeConfigFromEnv(cfg)
+		}
+		if err := runWSSmoke(context.Background(), smokeCfg, os.Stdout); err != nil {
 			slog.Error("websocket smoke failed", "error", err)
 			os.Exit(1)
 		}
@@ -52,5 +56,5 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, "usage: orbis serve | orbis ws smoke")
+	fmt.Fprintln(os.Stderr, "usage: orbis serve | orbis ws smoke [tool]")
 }

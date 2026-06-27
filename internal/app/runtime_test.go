@@ -13,9 +13,27 @@ import (
 	"github.com/sangjinsu/orbis/internal/broker"
 	"github.com/sangjinsu/orbis/internal/domain"
 	"github.com/sangjinsu/orbis/internal/protocol"
+	orbisruntime "github.com/sangjinsu/orbis/internal/runtime"
 	"github.com/sangjinsu/orbis/internal/store"
+	"github.com/sangjinsu/orbis/internal/tool"
 	"github.com/sangjinsu/orbis/internal/worker"
 )
+
+func mockToolWorker(t *testing.T, fileStore *store.FileStore) *worker.ToolWorker {
+	t.Helper()
+	registry := tool.NewRegistry()
+	if err := tool.RegisterMockTools(registry, func() time.Time {
+		return time.Unix(1700000000, 0).UTC()
+	}); err != nil {
+		t.Fatalf("RegisterMockTools error = %v", err)
+	}
+	return worker.NewToolWorker(worker.ToolWorkerConfig{
+		Registry: registry,
+		Policy:   tool.NewPolicy(registry, tool.DefaultPolicyConfig()),
+		Store:    fileStore,
+		Now:      func() time.Time { return time.Unix(1700000000, 0).UTC() },
+	})
+}
 
 func TestRuntimeServiceHandlesSessionMessageAsBackgroundEvent(t *testing.T) {
 	ctx := context.Background()
@@ -290,9 +308,7 @@ func TestRuntimeServiceRunsMockToolCallThenFinalAnswer(t *testing.T) {
 				},
 			},
 		},
-		ToolExecutor: worker.NewMockToolRegistry(func() time.Time {
-			return time.Unix(1700000000, 0).UTC()
-		}),
+		ToolRunner: mockToolWorker(t, fileStore),
 		Now: func() time.Time {
 			return time.Unix(1700000000, 0).UTC()
 		},
@@ -332,6 +348,80 @@ func TestRuntimeServiceRunsMockToolCallThenFinalAnswer(t *testing.T) {
 		run, err := fileStore.LoadRun(ctx, ack.RunID)
 		return err == nil && run.Status == domain.RunCompleted
 	})
+}
+
+func TestRuntimeServiceRetriesFailedToolThenCompletes(t *testing.T) {
+	ctx := context.Background()
+	fileStore := store.NewFileStore(t.TempDir())
+	eventBroker := broker.New()
+	events, unsubscribe := eventBroker.Subscribe(ctx, "session_1")
+	defer unsubscribe()
+	service := NewRuntimeService(RuntimeServiceConfig{
+		Store:  fileStore,
+		Broker: eventBroker,
+		LLMProvider: &fakeProvider{
+			streamBatches: [][]worker.LLMStreamEvent{
+				{
+					{
+						ToolCall: &worker.ToolCall{
+							ToolCallID: "call_1",
+							Name:       "mock.fail_once",
+							Args:       json.RawMessage(`{}`),
+						},
+						Done: true,
+					},
+				},
+				{
+					{Delta: "done", ProviderResponseID: "resp_2"},
+					{Done: true, ProviderResponseID: "resp_2"},
+				},
+			},
+		},
+		ToolRunner: mockToolWorker(t, fileStore),
+		ReducerConfig: orbisruntime.ReducerConfig{
+			ToolTimeout: time.Second,
+			Retry: tool.RetryPolicy{
+				MaxAttempts:       2,
+				InitialDelay:      time.Millisecond,
+				MaxDelay:          time.Millisecond,
+				BackoffMultiplier: 1,
+			},
+		},
+		Now: func() time.Time { return time.Unix(1700000000, 0).UTC() },
+	})
+
+	if _, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
+		Type:   "req",
+		ID:     "req_retry",
+		Method: "session.message",
+		Params: json.RawMessage(`{"session_id":"session_1","text":"use fail once"}`),
+	}); err != nil {
+		t.Fatalf("session.message error = %v", err)
+	}
+
+	received := collectRuntimeEventsUntil(t, events, string(domain.EventRunCompleted))
+	assertOrderedSubsequence(t, eventNames(received),
+		string(domain.EventToolCallStarted),
+		string(domain.EventToolCallFailed),
+		string(domain.EventToolCallRetryScheduled),
+		string(domain.EventTimerFired),
+		string(domain.EventToolCallRetried),
+		string(domain.EventToolCallSucceeded),
+		string(domain.EventRunCompleted),
+	)
+}
+
+func assertOrderedSubsequence(t *testing.T, names []string, want ...string) {
+	t.Helper()
+	idx := 0
+	for _, name := range names {
+		if idx < len(want) && name == want[idx] {
+			idx++
+		}
+	}
+	if idx != len(want) {
+		t.Fatalf("events = %#v, want ordered subsequence %#v (matched %d/%d)", names, want, idx, len(want))
+	}
 }
 
 func TestRuntimeServicePublishesLLMStartedBeforeProviderCompletes(t *testing.T) {

@@ -298,6 +298,156 @@ func TestReducerRunCompletedAndRunFailedEventsAreIdempotent(t *testing.T) {
 	}
 }
 
+func TestReducerToolFailureSchedulesRetry(t *testing.T) {
+	reducer := Reducer{}
+	now := time.Unix(1700000000, 0).UTC()
+	state := domain.SessionState{
+		SessionID:    "session_1",
+		CurrentRunID: "run_1",
+		RunStatus:    domain.RunWaitingTool,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	failed, _ := json.Marshal(ToolCallEventPayload{
+		ToolCallID:     "call_1",
+		Name:           "mock.fail_once",
+		IdempotencyKey: "run_1:tool:call_1",
+		Attempt:        1,
+		MaxAttempts:    2,
+		Retryable:      true,
+	})
+	event := domain.Event{
+		EventID: "evt_tool_failed", SessionID: "session_1", RunID: "run_1",
+		Type: domain.EventToolCallFailed, Seq: 4, CreatedAt: now, Payload: failed,
+	}
+
+	result, err := reducer.Apply(context.Background(), state, event)
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if result.NextState.RunStatus != domain.RunWaitingTimer {
+		t.Fatalf("RunStatus = %q, want WAITING_TIMER", result.NextState.RunStatus)
+	}
+	if len(result.Events) != 1 || result.Events[0].Type != domain.EventToolCallRetryScheduled {
+		t.Fatalf("events = %#v, want one ToolCallRetryScheduled", result.Events)
+	}
+	if len(result.Actions) != 1 || result.Actions[0].Type != domain.ActionScheduleTimer {
+		t.Fatalf("actions = %#v, want one ScheduleTimer", result.Actions)
+	}
+	var timer ScheduleTimerPayload
+	if err := json.Unmarshal(result.Actions[0].Payload, &timer); err != nil {
+		t.Fatalf("unmarshal timer payload: %v", err)
+	}
+	if timer.Kind != "tool_retry" || timer.ToolCall == nil || timer.ToolCall.Attempt != 2 {
+		t.Fatalf("timer payload = %#v, want tool_retry attempt 2", timer)
+	}
+	if timer.ToolCall.IdempotencyKey != "run_1:tool:call_1" {
+		t.Fatalf("retry idempotency key = %q, want stable run_1:tool:call_1", timer.ToolCall.IdempotencyKey)
+	}
+}
+
+func TestReducerToolFailureExhaustedFailsRun(t *testing.T) {
+	reducer := Reducer{}
+	now := time.Unix(1700000000, 0).UTC()
+	state := domain.SessionState{
+		SessionID: "session_1", CurrentRunID: "run_1", RunStatus: domain.RunWaitingTool,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	failed, _ := json.Marshal(ToolCallEventPayload{
+		ToolCallID: "call_1", Name: "mock.fail_once", IdempotencyKey: "run_1:tool:call_1",
+		Attempt: 2, MaxAttempts: 2, Retryable: true,
+	})
+	event := domain.Event{
+		EventID: "evt_tool_failed_final", SessionID: "session_1", RunID: "run_1",
+		Type: domain.EventToolCallFailed, Seq: 5, CreatedAt: now, Payload: failed,
+	}
+
+	result, err := reducer.Apply(context.Background(), state, event)
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if result.NextState.RunStatus != domain.RunFailed {
+		t.Fatalf("RunStatus = %q, want FAILED", result.NextState.RunStatus)
+	}
+	if len(result.Actions) != 0 {
+		t.Fatalf("actions len = %d, want 0", len(result.Actions))
+	}
+	if len(result.Events) != 1 || result.Events[0].Type != domain.EventRunFailed {
+		t.Fatalf("events = %#v, want one RunFailed", result.Events)
+	}
+}
+
+func TestReducerToolRejectedFailsRun(t *testing.T) {
+	reducer := Reducer{}
+	now := time.Unix(1700000000, 0).UTC()
+	state := domain.SessionState{
+		SessionID: "session_1", CurrentRunID: "run_1", RunStatus: domain.RunWaitingTool,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	rejected, _ := json.Marshal(ToolCallEventPayload{
+		ToolCallID: "call_1", Name: "mock.dangerous", ReasonCode: "toolset_not_allowed", Error: "denied",
+	})
+	event := domain.Event{
+		EventID: "evt_tool_rejected", SessionID: "session_1", RunID: "run_1",
+		Type: domain.EventToolCallRejected, Seq: 4, CreatedAt: now, Payload: rejected,
+	}
+
+	result, err := reducer.Apply(context.Background(), state, event)
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if result.NextState.RunStatus != domain.RunFailed {
+		t.Fatalf("RunStatus = %q, want FAILED", result.NextState.RunStatus)
+	}
+	if len(result.Events) != 1 || result.Events[0].Type != domain.EventRunFailed {
+		t.Fatalf("events = %#v, want one RunFailed", result.Events)
+	}
+}
+
+func TestReducerToolRetryTimerDispatchesToolCall(t *testing.T) {
+	reducer := Reducer{}
+	now := time.Unix(1700000000, 0).UTC()
+	state := domain.SessionState{
+		SessionID: "session_1", CurrentRunID: "run_1", RunStatus: domain.RunWaitingTimer,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	timerPayload, _ := json.Marshal(TimerFiredPayload{
+		Kind: "tool_retry",
+		ToolCall: &DispatchToolCallPayload{
+			ToolCallID: "call_1", Name: "mock.fail_once", IdempotencyKey: "run_1:tool:call_1",
+			Attempt: 2, MaxAttempts: 2,
+		},
+	})
+	event := domain.Event{
+		EventID: "evt_retry_timer", SessionID: "session_1", RunID: "run_1",
+		Type: domain.EventTimerFired, Seq: 6, CreatedAt: now, Payload: timerPayload,
+	}
+
+	result, err := reducer.Apply(context.Background(), state, event)
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if result.NextState.RunStatus != domain.RunWaitingTool {
+		t.Fatalf("RunStatus = %q, want WAITING_TOOL", result.NextState.RunStatus)
+	}
+	if len(result.Events) != 1 || result.Events[0].Type != domain.EventToolCallRetried {
+		t.Fatalf("events = %#v, want one ToolCallRetried", result.Events)
+	}
+	if len(result.Actions) != 1 || result.Actions[0].Type != domain.ActionDispatchToolCall {
+		t.Fatalf("actions = %#v, want one DispatchToolCall", result.Actions)
+	}
+	if result.Actions[0].IdempotencyKey != "run_1:tool:call_1" {
+		t.Fatalf("retry action key = %q, want stable run_1:tool:call_1", result.Actions[0].IdempotencyKey)
+	}
+	var call DispatchToolCallPayload
+	if err := json.Unmarshal(result.Actions[0].Payload, &call); err != nil {
+		t.Fatalf("unmarshal retry tool payload: %v", err)
+	}
+	if call.Attempt != 2 {
+		t.Fatalf("retry attempt = %d, want 2", call.Attempt)
+	}
+}
+
 func TestReducerTimerFiredFailsRunAndEmitsRunFailed(t *testing.T) {
 	reducer := Reducer{}
 	now := time.Unix(1700000000, 0).UTC()

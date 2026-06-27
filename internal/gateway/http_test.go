@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestHTTPHealthEndpoints(t *testing.T) {
@@ -21,8 +22,13 @@ func TestHTTPHealthEndpoints(t *testing.T) {
 	}
 }
 
-func TestDefaultReadTimeoutDisabledForLongRunningSubscriptions(t *testing.T) {
-	if got := defaultReadTimeout(); got != 0 {
-		t.Fatalf("defaultReadTimeout() = %v, want 0 for long-running subscriptions", got)
+func TestReadTimeoutDefaultsDisabledAndIsConfigurable(t *testing.T) {
+	cfg := handlerConfig{}
+	if cfg.readTimeout != 0 {
+		t.Fatalf("default readTimeout = %v, want 0 so idle subscriptions stay open", cfg.readTimeout)
+	}
+	WithReadTimeout(120 * time.Second)(&cfg)
+	if cfg.readTimeout != 120*time.Second {
+		t.Fatalf("readTimeout = %v, want 120s after WithReadTimeout", cfg.readTimeout)
 	}
 }

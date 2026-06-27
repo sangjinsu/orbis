@@ -40,5 +40,33 @@ See `.workspace/memory/history.md` for the v0.1 completion record.
 
 ## Post-v0.1 Follow-ups
 
-- decide and implement tool failure retry policy
 - collect real usage feedback before adopting OpenClaw/Hermes advanced features
+- keep real OpenAI `.env` WebSocket smoke as a release gate
+- tool failure retry policy: implemented in v0.2 (see below)
+
+## v0.2: Tool Calling Foundation
+
+Tool calling is now a first-class runtime capability. The LLM only proposes tool
+calls; the runtime validates, authorizes, dispatches, executes, observes, and
+persists them. Tool failure retry policy (the post-v0.1 follow-up) is implemented
+here.
+
+- `internal/tool`: `Tool` interface, registry, toolsets, policy (deny-by-default
+  for dangerous), retry policy, idempotency, mock tools.
+- Tool Worker (`internal/worker/tool_worker.go`) is the only tool executor:
+  policy -> dedup -> `context.WithTimeout` -> persist `data/tool_calls/{key}.json`.
+- Reducer derives a stable idempotency key (`runID:tool:toolCallID`), records
+  tool-call turns, decides retry vs failure, maps rejection to run failure, and
+  splits `TimerFired` into `run_timeout` vs `tool_retry`.
+- Dispatcher emits the full tool lifecycle and schedules retry timers without
+  auto-failing the run; `context_builder.go` threads conversation context.
+- Real LLM tool calling: OpenAI Responses provider sends tool schemas and parses
+  `function_call` output. Verify with `orbis ws smoke tool`.
+- Specs: `.spec/v0.2-tool-calling.md`, `decisions/v0.2-tool-calling-decisions.md`,
+  `docs/tool-calling.md`. Config: `ORBIS_TOOLSETS`, `ORBIS_TOOL_TIMEOUT_*`,
+  `ORBIS_TOOL_RETRY_*`, `ORBIS_WS_READ_TIMEOUT`.
+
+## Post-v0.2 Follow-ups
+
+- v1 skills: skill store/selection/auto-creation, tool search, subagents.
+- reconsider continuation-on-denial (feed reason back to LLM) once skills exist.

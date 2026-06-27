@@ -12,16 +12,19 @@ import (
 	"github.com/sangjinsu/orbis/internal/protocol"
 	orbisruntime "github.com/sangjinsu/orbis/internal/runtime"
 	"github.com/sangjinsu/orbis/internal/store"
+	"github.com/sangjinsu/orbis/internal/tool"
 	"github.com/sangjinsu/orbis/internal/worker"
 )
 
 type RuntimeServiceConfig struct {
-	Store        store.Store
-	Broker       EventBroker
-	LLMProvider  worker.LLMProvider
-	ToolExecutor orbisruntime.ToolExecutor
-	RunTimeout   time.Duration
-	Now          func() time.Time
+	Store         store.Store
+	Broker        EventBroker
+	LLMProvider   worker.LLMProvider
+	ToolRunner    orbisruntime.ToolRunner
+	ToolSchemas   []tool.ToolSchema
+	ReducerConfig orbisruntime.ReducerConfig
+	RunTimeout    time.Duration
+	Now           func() time.Time
 }
 
 type EventBroker interface {
@@ -38,6 +41,7 @@ type RuntimeService struct {
 	eventQueues map[string]chan domain.Event
 	dispatcher  *orbisruntime.Dispatcher
 	llmProvider worker.LLMProvider
+	reducerCfg  orbisruntime.ReducerConfig
 
 	runMu      sync.Mutex
 	activeRuns map[string]*runExecution
@@ -88,14 +92,16 @@ func NewRuntimeService(cfg RuntimeServiceConfig) *RuntimeService {
 		lanes:       map[string]*orbisruntime.SessionLane{},
 		eventQueues: map[string]chan domain.Event{},
 		llmProvider: cfg.LLMProvider,
+		reducerCfg:  cfg.ReducerConfig,
 		activeRuns:  map[string]*runExecution{},
 		runTimeout:  cfg.RunTimeout,
 	}
 	service.dispatcher = orbisruntime.NewDispatcher(orbisruntime.DispatcherConfig{
-		LLMProvider:  cfg.LLMProvider,
-		ToolExecutor: cfg.ToolExecutor,
-		EventSink:    service,
-		Now:          now,
+		LLMProvider: cfg.LLMProvider,
+		ToolRunner:  cfg.ToolRunner,
+		ToolSchemas: cfg.ToolSchemas,
+		EventSink:   service,
+		Now:         now,
 	})
 	return service
 }
@@ -391,7 +397,7 @@ func (s *RuntimeService) registerRun(runID, sessionID string) {
 	exec := &runExecution{ctx: ctx, cancel: cancel}
 	if s.runTimeout > 0 {
 		exec.timer = time.AfterFunc(s.runTimeout, func() {
-			payload, err := json.Marshal(map[string]string{"error": "run timeout", "reason": "run_timeout"})
+			payload, err := json.Marshal(map[string]string{"error": "run timeout", "reason": "run_timeout", "kind": "run_timeout"})
 			if err != nil {
 				payload = json.RawMessage(`{"error":"run timeout"}`)
 			}
@@ -473,7 +479,7 @@ func (s *RuntimeService) laneFor(sessionID string) *orbisruntime.SessionLane {
 	}
 	lane := orbisruntime.NewSessionLane(orbisruntime.SessionLaneConfig{
 		SessionID: sessionID,
-		Reducer:   orbisruntime.Reducer{},
+		Reducer:   orbisruntime.NewReducer(s.reducerCfg),
 		Store:     s.store,
 	})
 	s.lanes[sessionID] = lane

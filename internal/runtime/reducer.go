@@ -4,11 +4,43 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/sangjinsu/orbis/internal/domain"
+	"github.com/sangjinsu/orbis/internal/tool"
+	"github.com/sangjinsu/orbis/internal/worker"
 )
 
-type Reducer struct{}
+// ReducerConfig injects static tool-calling policy so the reducer can decide
+// retries deterministically without performing side effects.
+type ReducerConfig struct {
+	ToolTimeout time.Duration
+	Retry       tool.RetryPolicy
+}
+
+type Reducer struct {
+	cfg ReducerConfig
+}
+
+// NewReducer builds a configured reducer. The zero value Reducer{} is also
+// valid and falls back to safe defaults.
+func NewReducer(cfg ReducerConfig) Reducer {
+	return Reducer{cfg: cfg}
+}
+
+func (r Reducer) retryPolicy() tool.RetryPolicy {
+	if r.cfg.Retry.MaxAttempts == 0 {
+		return tool.DefaultRetryPolicy()
+	}
+	return r.cfg.Retry
+}
+
+func (r Reducer) toolTimeout() time.Duration {
+	if r.cfg.ToolTimeout <= 0 {
+		return 5 * time.Second
+	}
+	return r.cfg.ToolTimeout
+}
 
 type ReduceResult struct {
 	NextState domain.SessionState
@@ -21,7 +53,8 @@ type UserMessagePayload struct {
 }
 
 type DispatchLLMCallPayload struct {
-	Input string `json:"input"`
+	Input    string              `json:"input"`
+	Messages []worker.LLMMessage `json:"messages,omitempty"`
 }
 
 type RunStatusChangedPayload struct {
@@ -39,23 +72,53 @@ type AssistantDeltaPayload struct {
 	ProviderResponseID string `json:"provider_response_id,omitempty"`
 }
 
+// ToolCallPayload is an LLM-proposed tool call.
 type ToolCallPayload struct {
 	ToolCallID string          `json:"tool_call_id"`
 	Name       string          `json:"name"`
 	Args       json.RawMessage `json:"args"`
 }
 
+// DispatchToolCallPayload is the action payload that drives the Tool Worker. It
+// carries the attempt bookkeeping and timeout the reducer decided from config.
 type DispatchToolCallPayload struct {
-	ToolCallID string          `json:"tool_call_id"`
-	Name       string          `json:"name"`
-	Args       json.RawMessage `json:"args"`
+	ToolCallID     string          `json:"tool_call_id"`
+	Name           string          `json:"name"`
+	Args           json.RawMessage `json:"args"`
+	IdempotencyKey string          `json:"idempotency_key,omitempty"`
+	Attempt        int             `json:"attempt,omitempty"`
+	MaxAttempts    int             `json:"max_attempts,omitempty"`
+	Timeout        time.Duration   `json:"timeout,omitempty"`
 }
 
-type ToolCallResultPayload struct {
-	ToolCallID string          `json:"tool_call_id"`
-	Name       string          `json:"name"`
-	Result     json.RawMessage `json:"result,omitempty"`
-	Error      string          `json:"error,omitempty"`
+// ToolCallEventPayload is the shape of every tool lifecycle event.
+type ToolCallEventPayload struct {
+	ToolCallID     string          `json:"tool_call_id"`
+	Name           string          `json:"tool_name,omitempty"`
+	Args           json.RawMessage `json:"args,omitempty"`
+	IdempotencyKey string          `json:"idempotency_key,omitempty"`
+	Attempt        int             `json:"attempt,omitempty"`
+	MaxAttempts    int             `json:"max_attempts,omitempty"`
+	DurationMS     int64           `json:"duration_ms,omitempty"`
+	Result         json.RawMessage `json:"result,omitempty"`
+	Error          string          `json:"error,omitempty"`
+	ReasonCode     string          `json:"reason_code,omitempty"`
+	Retryable      bool            `json:"retryable,omitempty"`
+}
+
+// ScheduleTimerPayload drives the timer worker. Kind distinguishes a tool retry
+// backoff from a run timeout.
+type ScheduleTimerPayload struct {
+	Kind     string                   `json:"kind"`
+	Delay    time.Duration            `json:"delay"`
+	ToolCall *DispatchToolCallPayload `json:"tool_call,omitempty"`
+}
+
+// TimerFiredPayload is emitted when a scheduled timer elapses.
+type TimerFiredPayload struct {
+	Kind     string                   `json:"kind,omitempty"`
+	Reason   string                   `json:"reason,omitempty"`
+	ToolCall *DispatchToolCallPayload `json:"tool_call,omitempty"`
 }
 
 type FailurePayload struct {
@@ -67,7 +130,7 @@ type FinalAnswerPayload struct {
 	ProviderResponseID string `json:"provider_response_id"`
 }
 
-func (Reducer) Apply(ctx context.Context, state domain.SessionState, event domain.Event) (ReduceResult, error) {
+func (r Reducer) Apply(ctx context.Context, state domain.SessionState, event domain.Event) (ReduceResult, error) {
 	_ = ctx
 
 	next := state
@@ -86,15 +149,17 @@ func (Reducer) Apply(ctx context.Context, state domain.SessionState, event domai
 	case domain.EventUserMessageReceived:
 		return reduceUserMessage(next, event)
 	case domain.EventLLMResponseReceived:
-		return reduceLLMResponse(next, event)
+		return r.reduceLLMResponse(next, event)
 	case domain.EventLLMCallFailed:
 		return reduceFailure(next, event)
 	case domain.EventToolCallSucceeded:
 		return reduceToolCallSucceeded(next, event)
-	case domain.EventToolCallFailed:
-		return reduceFailure(next, event)
+	case domain.EventToolCallFailed, domain.EventToolCallTimedOut:
+		return r.reduceToolFailure(next, event)
+	case domain.EventToolCallRejected:
+		return reduceToolRejected(next, event)
 	case domain.EventTimerFired:
-		return reduceTimerFired(next, event)
+		return r.reduceTimerFired(next, event)
 	case domain.EventFinalAnswerEmitted:
 		return ReduceResult{NextState: next}, nil
 	case domain.EventRunCompleted:
@@ -111,14 +176,22 @@ func (Reducer) Apply(ctx context.Context, state domain.SessionState, event domai
 	}
 }
 
-func reduceTimerFired(state domain.SessionState, event domain.Event) (ReduceResult, error) {
+func (r Reducer) reduceTimerFired(state domain.SessionState, event domain.Event) (ReduceResult, error) {
 	if isTerminalRunStatus(state.RunStatus) {
 		return ReduceResult{NextState: state}, nil
 	}
+	var payload TimerFiredPayload
+	if len(event.Payload) > 0 {
+		_ = json.Unmarshal(event.Payload, &payload)
+	}
+	if payload.Kind == "tool_retry" && payload.ToolCall != nil {
+		return r.reduceToolRetryTimer(state, event, *payload.ToolCall)
+	}
+
 	state.RunStatus = domain.RunFailed
-	payload := event.Payload
-	if len(payload) == 0 {
-		payload = json.RawMessage(`{"error":"run timeout"}`)
+	failPayload := event.Payload
+	if len(failPayload) == 0 {
+		failPayload = json.RawMessage(`{"error":"run timeout"}`)
 	}
 	return ReduceResult{
 		NextState: state,
@@ -128,13 +201,47 @@ func reduceTimerFired(state domain.SessionState, event domain.Event) (ReduceResu
 			RunID:     event.RunID,
 			Type:      domain.EventRunFailed,
 			CreatedAt: event.CreatedAt,
-			Payload:   payload,
+			Payload:   failPayload,
 		}},
 	}, nil
 }
 
-func isTerminalRunStatus(status domain.RunStatus) bool {
-	return status == domain.RunCompleted || status == domain.RunFailed || status == domain.RunCancelled
+func (r Reducer) reduceToolRetryTimer(state domain.SessionState, event domain.Event, call DispatchToolCallPayload) (ReduceResult, error) {
+	state.RunStatus = domain.RunWaitingTool
+	actionPayload, err := json.Marshal(call)
+	if err != nil {
+		return ReduceResult{}, fmt.Errorf("marshal retry tool action payload: %w", err)
+	}
+	action := domain.Action{
+		ActionID:       fmt.Sprintf("%s:tool:%s:%d", event.RunID, call.ToolCallID, call.Attempt),
+		SessionID:      event.SessionID,
+		RunID:          event.RunID,
+		Type:           domain.ActionDispatchToolCall,
+		IdempotencyKey: call.IdempotencyKey,
+		Payload:        actionPayload,
+	}
+	if err := action.Validate(); err != nil {
+		return ReduceResult{}, err
+	}
+	retriedPayload, err := json.Marshal(ToolCallEventPayload{
+		ToolCallID:     call.ToolCallID,
+		Name:           call.Name,
+		IdempotencyKey: call.IdempotencyKey,
+		Attempt:        call.Attempt,
+		MaxAttempts:    call.MaxAttempts,
+	})
+	if err != nil {
+		return ReduceResult{}, fmt.Errorf("marshal tool retried payload: %w", err)
+	}
+	retried := domain.Event{
+		EventID:   fmt.Sprintf("%s:tool_retried:%s:%d", event.RunID, call.ToolCallID, call.Attempt),
+		SessionID: event.SessionID,
+		RunID:     event.RunID,
+		Type:      domain.EventToolCallRetried,
+		CreatedAt: event.CreatedAt,
+		Payload:   retriedPayload,
+	}
+	return ReduceResult{NextState: state, Events: []domain.Event{retried}, Actions: []domain.Action{action}}, nil
 }
 
 func reduceFailure(state domain.SessionState, event domain.Event) (ReduceResult, error) {
@@ -146,6 +253,111 @@ func reduceFailure(state domain.SessionState, event domain.Event) (ReduceResult,
 	}
 	state.RunStatus = domain.RunFailed
 	return ReduceResult{NextState: state}, nil
+}
+
+// reduceToolFailure decides whether to retry a failed/timed-out tool call or
+// fail the run, using the static retry policy. It never executes a tool.
+func (r Reducer) reduceToolFailure(state domain.SessionState, event domain.Event) (ReduceResult, error) {
+	if isTerminalRunStatus(state.RunStatus) {
+		return ReduceResult{NextState: state}, nil
+	}
+	var payload ToolCallEventPayload
+	if len(event.Payload) > 0 {
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return ReduceResult{}, fmt.Errorf("decode tool failure payload: %w", err)
+		}
+	}
+	if payload.Retryable && payload.Attempt > 0 && payload.Attempt < payload.MaxAttempts {
+		return r.scheduleToolRetry(state, event, payload)
+	}
+
+	state.RunStatus = domain.RunFailed
+	failPayload := event.Payload
+	if len(failPayload) == 0 {
+		failPayload = json.RawMessage(`{"error":"tool failed"}`)
+	}
+	return ReduceResult{
+		NextState: state,
+		Events: []domain.Event{{
+			EventID:   event.RunID + ":failed:tool",
+			SessionID: event.SessionID,
+			RunID:     event.RunID,
+			Type:      domain.EventRunFailed,
+			CreatedAt: event.CreatedAt,
+			Payload:   failPayload,
+		}},
+	}, nil
+}
+
+func (r Reducer) scheduleToolRetry(state domain.SessionState, event domain.Event, failed ToolCallEventPayload) (ReduceResult, error) {
+	nextAttempt := failed.Attempt + 1
+	delay := r.retryPolicy().NextDelay(nextAttempt)
+	nextCall := DispatchToolCallPayload{
+		ToolCallID:     failed.ToolCallID,
+		Name:           failed.Name,
+		Args:           failed.Args,
+		IdempotencyKey: failed.IdempotencyKey,
+		Attempt:        nextAttempt,
+		MaxAttempts:    failed.MaxAttempts,
+		Timeout:        r.toolTimeout(),
+	}
+	timerPayload, err := json.Marshal(ScheduleTimerPayload{Kind: "tool_retry", Delay: delay, ToolCall: &nextCall})
+	if err != nil {
+		return ReduceResult{}, fmt.Errorf("marshal schedule timer payload: %w", err)
+	}
+	state.RunStatus = domain.RunWaitingTimer
+	action := domain.Action{
+		ActionID:       fmt.Sprintf("%s:tool_retry:%s:%d", event.RunID, failed.ToolCallID, nextAttempt),
+		SessionID:      event.SessionID,
+		RunID:          event.RunID,
+		Type:           domain.ActionScheduleTimer,
+		IdempotencyKey: fmt.Sprintf("%s:ScheduleTimer:%s:%d", event.RunID, failed.ToolCallID, nextAttempt),
+		Payload:        timerPayload,
+	}
+	if err := action.Validate(); err != nil {
+		return ReduceResult{}, err
+	}
+	scheduledPayload, err := json.Marshal(ToolCallEventPayload{
+		ToolCallID:     failed.ToolCallID,
+		Name:           failed.Name,
+		IdempotencyKey: failed.IdempotencyKey,
+		Attempt:        nextAttempt,
+		MaxAttempts:    failed.MaxAttempts,
+	})
+	if err != nil {
+		return ReduceResult{}, fmt.Errorf("marshal tool retry scheduled payload: %w", err)
+	}
+	scheduled := domain.Event{
+		EventID:   fmt.Sprintf("%s:tool_retry_scheduled:%s:%d", event.RunID, failed.ToolCallID, nextAttempt),
+		SessionID: event.SessionID,
+		RunID:     event.RunID,
+		Type:      domain.EventToolCallRetryScheduled,
+		CreatedAt: event.CreatedAt,
+		Payload:   scheduledPayload,
+	}
+	return ReduceResult{NextState: state, Events: []domain.Event{scheduled}, Actions: []domain.Action{action}}, nil
+}
+
+func reduceToolRejected(state domain.SessionState, event domain.Event) (ReduceResult, error) {
+	if isTerminalRunStatus(state.RunStatus) {
+		return ReduceResult{NextState: state}, nil
+	}
+	state.RunStatus = domain.RunFailed
+	failPayload := event.Payload
+	if len(failPayload) == 0 {
+		failPayload = json.RawMessage(`{"error":"tool rejected"}`)
+	}
+	return ReduceResult{
+		NextState: state,
+		Events: []domain.Event{{
+			EventID:   event.RunID + ":failed:rejected",
+			SessionID: event.SessionID,
+			RunID:     event.RunID,
+			Type:      domain.EventRunFailed,
+			CreatedAt: event.CreatedAt,
+			Payload:   failPayload,
+		}},
+	}, nil
 }
 
 func reduceUserMessage(state domain.SessionState, event domain.Event) (ReduceResult, error) {
@@ -165,7 +377,7 @@ func reduceUserMessage(state domain.SessionState, event domain.Event) (ReduceRes
 		CreatedAt: event.CreatedAt,
 	})
 
-	actionPayload, err := json.Marshal(DispatchLLMCallPayload{Input: payload.Text})
+	actionPayload, err := json.Marshal(DispatchLLMCallPayload{Input: payload.Text, Messages: BuildLLMMessages(state)})
 	if err != nil {
 		return ReduceResult{}, fmt.Errorf("marshal llm action payload: %w", err)
 	}
@@ -209,13 +421,13 @@ func reduceUserMessage(state domain.SessionState, event domain.Event) (ReduceRes
 	}, nil
 }
 
-func reduceLLMResponse(state domain.SessionState, event domain.Event) (ReduceResult, error) {
+func (r Reducer) reduceLLMResponse(state domain.SessionState, event domain.Event) (ReduceResult, error) {
 	var payload LLMResponsePayload
 	if err := json.Unmarshal(event.Payload, &payload); err != nil {
 		return ReduceResult{}, fmt.Errorf("decode llm response payload: %w", err)
 	}
 	if payload.ToolCall != nil {
-		return reduceLLMToolCall(state, event, *payload.ToolCall)
+		return r.reduceLLMToolCall(state, event, *payload.ToolCall)
 	}
 	if payload.Text == "" {
 		return ReduceResult{}, fmt.Errorf("llm response text or tool_call is required")
@@ -253,7 +465,7 @@ func reduceLLMResponse(state domain.SessionState, event domain.Event) (ReduceRes
 	}, nil
 }
 
-func reduceLLMToolCall(state domain.SessionState, event domain.Event, toolCall ToolCallPayload) (ReduceResult, error) {
+func (r Reducer) reduceLLMToolCall(state domain.SessionState, event domain.Event, toolCall ToolCallPayload) (ReduceResult, error) {
 	if toolCall.ToolCallID == "" {
 		return ReduceResult{}, fmt.Errorf("tool_call_id is required")
 	}
@@ -265,20 +477,33 @@ func reduceLLMToolCall(state domain.SessionState, event domain.Event, toolCall T
 	}
 
 	state.RunStatus = domain.RunWaitingTool
-	actionPayload, err := json.Marshal(DispatchToolCallPayload{
+	state.MessageHistory = append(state.MessageHistory, domain.Message{
+		Role:       "assistant",
+		CreatedAt:  event.CreatedAt,
 		ToolCallID: toolCall.ToolCallID,
-		Name:       toolCall.Name,
-		Args:       toolCall.Args,
+		ToolName:   toolCall.Name,
+		ToolArgs:   toolCall.Args,
+	})
+
+	idempotencyKey := event.RunID + ":tool:" + toolCall.ToolCallID
+	actionPayload, err := json.Marshal(DispatchToolCallPayload{
+		ToolCallID:     toolCall.ToolCallID,
+		Name:           toolCall.Name,
+		Args:           toolCall.Args,
+		IdempotencyKey: idempotencyKey,
+		Attempt:        1,
+		MaxAttempts:    r.retryPolicy().MaxAttempts,
+		Timeout:        r.toolTimeout(),
 	})
 	if err != nil {
 		return ReduceResult{}, fmt.Errorf("marshal tool action payload: %w", err)
 	}
 	action := domain.Action{
-		ActionID:       event.RunID + ":tool:" + event.EventID,
+		ActionID:       fmt.Sprintf("%s:tool:%s:1", event.RunID, toolCall.ToolCallID),
 		SessionID:      event.SessionID,
 		RunID:          event.RunID,
 		Type:           domain.ActionDispatchToolCall,
-		IdempotencyKey: event.RunID + ":DispatchToolCall:" + event.EventID,
+		IdempotencyKey: idempotencyKey,
 		Payload:        actionPayload,
 	}
 	if err := action.Validate(); err != nil {
@@ -288,22 +513,27 @@ func reduceLLMToolCall(state domain.SessionState, event domain.Event, toolCall T
 }
 
 func reduceToolCallSucceeded(state domain.SessionState, event domain.Event) (ReduceResult, error) {
-	var payload ToolCallResultPayload
+	var payload ToolCallEventPayload
 	if err := json.Unmarshal(event.Payload, &payload); err != nil {
 		return ReduceResult{}, fmt.Errorf("decode tool result payload: %w", err)
 	}
 	if payload.ToolCallID == "" {
 		return ReduceResult{}, fmt.Errorf("tool_call_id is required")
 	}
+	if isTerminalRunStatus(state.RunStatus) {
+		return ReduceResult{NextState: state}, nil
+	}
 	state.RunStatus = domain.RunWaitingLLM
 	resultText := string(payload.Result)
 	state.MessageHistory = append(state.MessageHistory, domain.Message{
-		Role:      "tool",
-		Content:   resultText,
-		CreatedAt: event.CreatedAt,
+		Role:       "tool",
+		Content:    resultText,
+		CreatedAt:  event.CreatedAt,
+		ToolCallID: payload.ToolCallID,
+		ToolName:   payload.Name,
 	})
 
-	actionPayload, err := json.Marshal(DispatchLLMCallPayload{Input: resultText})
+	actionPayload, err := json.Marshal(DispatchLLMCallPayload{Input: resultText, Messages: BuildLLMMessages(state)})
 	if err != nil {
 		return ReduceResult{}, fmt.Errorf("marshal follow-up llm action payload: %w", err)
 	}
@@ -319,4 +549,8 @@ func reduceToolCallSucceeded(state domain.SessionState, event domain.Event) (Red
 		return ReduceResult{}, err
 	}
 	return ReduceResult{NextState: state, Actions: []domain.Action{action}}, nil
+}
+
+func isTerminalRunStatus(status domain.RunStatus) bool {
+	return status == domain.RunCompleted || status == domain.RunFailed || status == domain.RunCancelled
 }

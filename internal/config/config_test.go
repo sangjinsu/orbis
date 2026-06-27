@@ -70,3 +70,79 @@ ORBIS_LLM_PROVIDER=openai
 		t.Fatal("Load() error = nil, want missing LLM settings error")
 	}
 }
+
+func TestLoadToolDefaults(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	content := []byte("ORBIS_LLM_MODEL=gpt-test\nOPENAI_API_KEY=test-key\n")
+	if err := os.WriteFile(envPath, content, 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+
+	cfg, err := Load(envPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Toolsets != "safe" {
+		t.Fatalf("Toolsets = %q, want safe", cfg.Toolsets)
+	}
+	if cfg.ToolTimeoutDefault != 5*time.Second {
+		t.Fatalf("ToolTimeoutDefault = %v, want 5s", cfg.ToolTimeoutDefault)
+	}
+	if cfg.ToolTimeoutMax != 30*time.Second {
+		t.Fatalf("ToolTimeoutMax = %v, want 30s", cfg.ToolTimeoutMax)
+	}
+	if cfg.ToolRetryMaxAttempts != 2 {
+		t.Fatalf("ToolRetryMaxAttempts = %d, want 2", cfg.ToolRetryMaxAttempts)
+	}
+	if cfg.ToolRetryInitialDelay != 500*time.Millisecond {
+		t.Fatalf("ToolRetryInitialDelay = %v, want 500ms", cfg.ToolRetryInitialDelay)
+	}
+	if cfg.ToolRetryBackoffFactor != 2.0 {
+		t.Fatalf("ToolRetryBackoffFactor = %v, want 2.0", cfg.ToolRetryBackoffFactor)
+	}
+}
+
+func TestLoadToolOverrides(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	content := []byte(`ORBIS_LLM_MODEL=gpt-test
+OPENAI_API_KEY=test-key
+ORBIS_TOOLSETS=safe,read
+ORBIS_TOOL_TIMEOUT_DEFAULT=2s
+ORBIS_TOOL_RETRY_MAX_ATTEMPTS=4
+ORBIS_TOOL_RETRY_BACKOFF=1.5
+`)
+	if err := os.WriteFile(envPath, content, 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+
+	cfg, err := Load(envPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Toolsets != "safe,read" {
+		t.Fatalf("Toolsets = %q, want safe,read", cfg.Toolsets)
+	}
+	if cfg.ToolTimeoutDefault != 2*time.Second {
+		t.Fatalf("ToolTimeoutDefault = %v, want 2s", cfg.ToolTimeoutDefault)
+	}
+	if cfg.ToolRetryMaxAttempts != 4 {
+		t.Fatalf("ToolRetryMaxAttempts = %d, want 4", cfg.ToolRetryMaxAttempts)
+	}
+	if cfg.ToolRetryBackoffFactor != 1.5 {
+		t.Fatalf("ToolRetryBackoffFactor = %v, want 1.5", cfg.ToolRetryBackoffFactor)
+	}
+}
+
+func TestLoadRejectsInvalidToolDuration(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	content := []byte("ORBIS_LLM_MODEL=gpt-test\nOPENAI_API_KEY=test-key\nORBIS_TOOL_TIMEOUT_DEFAULT=notaduration\n")
+	if err := os.WriteFile(envPath, content, 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+	if _, err := Load(envPath); err == nil {
+		t.Fatal("Load() error = nil, want invalid duration error")
+	}
+}

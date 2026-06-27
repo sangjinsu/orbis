@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sangjinsu/orbis/internal/domain"
+	"github.com/sangjinsu/orbis/internal/tool"
 	"github.com/sangjinsu/orbis/internal/worker"
 )
 
@@ -15,22 +16,27 @@ type EventSink interface {
 	Enqueue(ctx context.Context, event domain.Event) error
 }
 
-type ToolExecutor interface {
-	Execute(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error)
+// ToolRunner executes a single tool call and returns a structured outcome. The
+// Tool Worker is the only implementation; the dispatcher turns outcomes into
+// events but never executes tools itself.
+type ToolRunner interface {
+	Run(ctx context.Context, req worker.ToolRequest) worker.ToolOutcome
 }
 
 type DispatcherConfig struct {
-	LLMProvider  worker.LLMProvider
-	ToolExecutor ToolExecutor
-	EventSink    EventSink
-	Now          func() time.Time
+	LLMProvider worker.LLMProvider
+	ToolRunner  ToolRunner
+	ToolSchemas []tool.ToolSchema
+	EventSink   EventSink
+	Now         func() time.Time
 }
 
 type Dispatcher struct {
-	llmProvider  worker.LLMProvider
-	toolExecutor ToolExecutor
-	eventSink    EventSink
-	now          func() time.Time
+	llmProvider worker.LLMProvider
+	toolRunner  ToolRunner
+	toolSchemas []tool.ToolSchema
+	eventSink   EventSink
+	now         func() time.Time
 }
 
 func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
@@ -39,10 +45,11 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 		now = func() time.Time { return time.Now().UTC() }
 	}
 	return &Dispatcher{
-		llmProvider:  cfg.LLMProvider,
-		toolExecutor: cfg.ToolExecutor,
-		eventSink:    cfg.EventSink,
-		now:          now,
+		llmProvider: cfg.LLMProvider,
+		toolRunner:  cfg.ToolRunner,
+		toolSchemas: cfg.ToolSchemas,
+		eventSink:   cfg.EventSink,
+		now:         now,
 	}
 }
 
@@ -55,6 +62,8 @@ func (d *Dispatcher) Dispatch(ctx context.Context, action domain.Action) error {
 		return d.dispatchLLMCall(ctx, action)
 	case domain.ActionDispatchToolCall:
 		return d.dispatchToolCall(ctx, action)
+	case domain.ActionScheduleTimer:
+		return d.dispatchScheduleTimer(ctx, action)
 	case domain.ActionEmitFinalAnswer:
 		return d.dispatchFinalAnswer(ctx, action)
 	default:
@@ -85,7 +94,11 @@ func (d *Dispatcher) dispatchLLMCall(ctx context.Context, action domain.Action) 
 		return err
 	}
 
-	stream, err := d.llmProvider.Stream(ctx, worker.LLMRequest{Input: payload.Input})
+	stream, err := d.llmProvider.Stream(ctx, worker.LLMRequest{
+		Input:    payload.Input,
+		Messages: payload.Messages,
+		Tools:    d.toolSchemas,
+	})
 	if err != nil {
 		return d.dispatchLLMFailure(ctx, action, err)
 	}
@@ -156,8 +169,8 @@ func (d *Dispatcher) dispatchLLMCall(ctx context.Context, action domain.Action) 
 }
 
 func (d *Dispatcher) dispatchToolCall(ctx context.Context, action domain.Action) error {
-	if d.toolExecutor == nil {
-		return fmt.Errorf("tool executor is required")
+	if d.toolRunner == nil {
+		return fmt.Errorf("tool runner is required")
 	}
 	if d.eventSink == nil {
 		return fmt.Errorf("event sink is required")
@@ -166,10 +179,18 @@ func (d *Dispatcher) dispatchToolCall(ctx context.Context, action domain.Action)
 	if err := json.Unmarshal(action.Payload, &payload); err != nil {
 		return fmt.Errorf("decode tool action payload: %w", err)
 	}
-	startedPayload, err := json.Marshal(ToolCallPayload{
-		ToolCallID: payload.ToolCallID,
-		Name:       payload.Name,
-		Args:       payload.Args,
+	attempt := payload.Attempt
+	if attempt < 1 {
+		attempt = 1
+	}
+
+	startedPayload, err := json.Marshal(ToolCallEventPayload{
+		ToolCallID:     payload.ToolCallID,
+		Name:           payload.Name,
+		Args:           payload.Args,
+		IdempotencyKey: action.IdempotencyKey,
+		Attempt:        attempt,
+		MaxAttempts:    payload.MaxAttempts,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal tool started payload: %w", err)
@@ -185,54 +206,118 @@ func (d *Dispatcher) dispatchToolCall(ctx context.Context, action domain.Action)
 		return err
 	}
 
-	result, err := d.toolExecutor.Execute(ctx, payload.Name, payload.Args)
-	if err != nil {
-		return d.dispatchToolFailure(ctx, action, payload, err)
-	}
-	resultPayload, err := json.Marshal(ToolCallResultPayload{
-		ToolCallID: payload.ToolCallID,
-		Name:       payload.Name,
-		Result:     result,
+	outcome := d.toolRunner.Run(ctx, worker.ToolRequest{
+		SessionID:      action.SessionID,
+		RunID:          action.RunID,
+		ToolCallID:     payload.ToolCallID,
+		ToolName:       payload.Name,
+		Args:           payload.Args,
+		IdempotencyKey: action.IdempotencyKey,
+		Attempt:        attempt,
+		MaxAttempts:    payload.MaxAttempts,
+		Timeout:        payload.Timeout,
 	})
+
+	switch outcome.Status {
+	case worker.ToolOutcomeSucceeded:
+		return d.emitToolSucceeded(ctx, action, payload, attempt, outcome)
+	case worker.ToolOutcomeDeduplicated:
+		if err := d.emitToolEvent(ctx, action, domain.EventToolCallDeduplicated, ToolCallEventPayload{
+			ToolCallID:     payload.ToolCallID,
+			Name:           payload.Name,
+			IdempotencyKey: action.IdempotencyKey,
+			Attempt:        attempt,
+			MaxAttempts:    payload.MaxAttempts,
+			Result:         outcome.Result,
+		}, ":deduplicated"); err != nil {
+			return err
+		}
+		return d.emitToolSucceeded(ctx, action, payload, attempt, outcome)
+	case worker.ToolOutcomeRejected:
+		return d.emitToolEvent(ctx, action, domain.EventToolCallRejected, ToolCallEventPayload{
+			ToolCallID:     payload.ToolCallID,
+			Name:           payload.Name,
+			IdempotencyKey: action.IdempotencyKey,
+			Attempt:        attempt,
+			MaxAttempts:    payload.MaxAttempts,
+			ReasonCode:     outcome.ReasonCode,
+			Error:          outcome.Error,
+		}, ":rejected")
+	default:
+		eventType := domain.EventToolCallFailed
+		if outcome.TimedOut {
+			eventType = domain.EventToolCallTimedOut
+		}
+		return d.emitToolEvent(ctx, action, eventType, ToolCallEventPayload{
+			ToolCallID:     payload.ToolCallID,
+			Name:           payload.Name,
+			Args:           payload.Args,
+			IdempotencyKey: action.IdempotencyKey,
+			Attempt:        attempt,
+			MaxAttempts:    payload.MaxAttempts,
+			DurationMS:     outcome.DurationMS,
+			Error:          outcome.Error,
+			ReasonCode:     outcome.ReasonCode,
+			Retryable:      outcome.Retryable,
+		}, ":failed")
+	}
+}
+
+func (d *Dispatcher) emitToolSucceeded(ctx context.Context, action domain.Action, payload DispatchToolCallPayload, attempt int, outcome worker.ToolOutcome) error {
+	return d.emitToolEvent(ctx, action, domain.EventToolCallSucceeded, ToolCallEventPayload{
+		ToolCallID:     payload.ToolCallID,
+		Name:           payload.Name,
+		IdempotencyKey: action.IdempotencyKey,
+		Attempt:        attempt,
+		MaxAttempts:    payload.MaxAttempts,
+		DurationMS:     outcome.DurationMS,
+		Result:         outcome.Result,
+	}, ":succeeded")
+}
+
+func (d *Dispatcher) emitToolEvent(ctx context.Context, action domain.Action, eventType domain.EventType, payload ToolCallEventPayload, suffix string) error {
+	encoded, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("marshal tool result payload: %w", err)
+		return fmt.Errorf("marshal %s payload: %w", eventType, err)
 	}
 	return d.eventSink.Enqueue(ctx, domain.Event{
-		EventID:   action.ActionID + ":succeeded",
+		EventID:   action.ActionID + suffix,
 		SessionID: action.SessionID,
 		RunID:     action.RunID,
-		Type:      domain.EventToolCallSucceeded,
+		Type:      eventType,
 		CreatedAt: d.now(),
-		Payload:   resultPayload,
+		Payload:   encoded,
 	})
 }
 
-func (d *Dispatcher) dispatchToolFailure(ctx context.Context, action domain.Action, payload DispatchToolCallPayload, cause error) error {
-	failurePayload, marshalErr := json.Marshal(ToolCallResultPayload{
-		ToolCallID: payload.ToolCallID,
-		Name:       payload.Name,
-		Error:      cause.Error(),
-	})
-	if marshalErr != nil {
-		return marshalErr
+func (d *Dispatcher) dispatchScheduleTimer(ctx context.Context, action domain.Action) error {
+	if d.eventSink == nil {
+		return fmt.Errorf("event sink is required")
 	}
-	if err := d.eventSink.Enqueue(ctx, domain.Event{
-		EventID:   action.ActionID + ":failed",
-		SessionID: action.SessionID,
-		RunID:     action.RunID,
-		Type:      domain.EventToolCallFailed,
-		CreatedAt: d.now(),
-		Payload:   failurePayload,
-	}); err != nil {
-		return err
+	var payload ScheduleTimerPayload
+	if err := json.Unmarshal(action.Payload, &payload); err != nil {
+		return fmt.Errorf("decode schedule timer payload: %w", err)
+	}
+	if payload.Delay > 0 {
+		timer := time.NewTimer(payload.Delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	firedPayload, err := json.Marshal(TimerFiredPayload{Kind: payload.Kind, ToolCall: payload.ToolCall})
+	if err != nil {
+		return fmt.Errorf("marshal timer fired payload: %w", err)
 	}
 	return d.eventSink.Enqueue(ctx, domain.Event{
-		EventID:   action.RunID + ":failed",
+		EventID:   action.ActionID + ":fired",
 		SessionID: action.SessionID,
 		RunID:     action.RunID,
-		Type:      domain.EventRunFailed,
+		Type:      domain.EventTimerFired,
 		CreatedAt: d.now(),
-		Payload:   failurePayload,
+		Payload:   firedPayload,
 	})
 }
 
