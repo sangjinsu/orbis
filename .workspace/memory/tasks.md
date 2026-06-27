@@ -66,6 +66,19 @@ here.
   `docs/tool-calling.md`. Config: `ORBIS_TOOLSETS`, `ORBIS_TOOL_TIMEOUT_*`,
   `ORBIS_TOOL_RETRY_*`, `ORBIS_WS_READ_TIMEOUT`.
 
+## v0.2 Status
+
+Completed on 2026-06-27 (PR #17 merged to `main`).
+
+Fresh main-branch verification:
+
+- `go test ./...`
+- `go test -race ./...`
+- `git diff --check`
+- real OpenAI `.env` WebSocket tool smoke reached `RunCompleted` via a tool call
+
+See `.workspace/memory/history.md` for the v0.2 completion record.
+
 ## Post-v0.2 Follow-ups
 
 - v1 skills: skill store/selection/auto-creation, tool search, subagents.
