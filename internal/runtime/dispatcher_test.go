@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/sangjinsu/orbis/internal/domain"
@@ -55,6 +56,75 @@ func TestDispatcherRoutesLLMActionToProviderAndEnqueuesResultEvents(t *testing.T
 	}
 }
 
+func TestDispatcherRoutesFinalAnswerToRuntimeEvents(t *testing.T) {
+	sink := &recordingEventSink{}
+	dispatcher := NewDispatcher(DispatcherConfig{EventSink: sink})
+	payload, err := json.Marshal(FinalAnswerPayload{Text: "hello", ProviderResponseID: "resp_1"})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	action := domain.Action{
+		ActionID:       "act_final",
+		SessionID:      "session_1",
+		RunID:          "run_1",
+		Type:           domain.ActionEmitFinalAnswer,
+		IdempotencyKey: "run_1:final:act_final",
+		Payload:        payload,
+	}
+
+	if err := dispatcher.Dispatch(context.Background(), action); err != nil {
+		t.Fatalf("Dispatch() error = %v", err)
+	}
+
+	if len(sink.events) != 2 {
+		t.Fatalf("events len = %d, want 2", len(sink.events))
+	}
+	if sink.events[0].Type != domain.EventFinalAnswerEmitted {
+		t.Fatalf("first event = %q, want %q", sink.events[0].Type, domain.EventFinalAnswerEmitted)
+	}
+	if sink.events[1].Type != domain.EventRunCompleted {
+		t.Fatalf("second event = %q, want %q", sink.events[1].Type, domain.EventRunCompleted)
+	}
+}
+
+func TestDispatcherProviderFailureEmitsLLMAndRunFailure(t *testing.T) {
+	sink := &recordingEventSink{}
+	provider := &fakeLLMProvider{err: errors.New("provider timeout")}
+	dispatcher := NewDispatcher(DispatcherConfig{
+		LLMProvider: provider,
+		EventSink:   sink,
+	})
+	payload, err := json.Marshal(DispatchLLMCallPayload{Input: "Say hello"})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	action := domain.Action{
+		ActionID:       "act_1",
+		SessionID:      "session_1",
+		RunID:          "run_1",
+		Type:           domain.ActionDispatchLLMCall,
+		IdempotencyKey: "run_1:llm:act_1",
+		Payload:        payload,
+	}
+
+	if err := dispatcher.Dispatch(context.Background(), action); err != nil {
+		t.Fatalf("Dispatch() error = %v", err)
+	}
+
+	if len(sink.events) != 3 {
+		t.Fatalf("events len = %d, want 3", len(sink.events))
+	}
+	if sink.events[0].Type != domain.EventLLMCallStarted {
+		t.Fatalf("first event = %q, want %q", sink.events[0].Type, domain.EventLLMCallStarted)
+	}
+	if sink.events[1].Type != domain.EventLLMCallFailed {
+		t.Fatalf("second event = %q, want %q", sink.events[1].Type, domain.EventLLMCallFailed)
+	}
+	if sink.events[2].Type != domain.EventRunFailed {
+		t.Fatalf("third event = %q, want %q", sink.events[2].Type, domain.EventRunFailed)
+	}
+}
+
 type recordingEventSink struct {
 	events []domain.Event
 }
@@ -67,12 +137,16 @@ func (s *recordingEventSink) Enqueue(ctx context.Context, event domain.Event) er
 
 type fakeLLMProvider struct {
 	response  worker.LLMResponse
+	err       error
 	seenInput string
 }
 
 func (p *fakeLLMProvider) Complete(ctx context.Context, req worker.LLMRequest) (worker.LLMResponse, error) {
 	_ = ctx
 	p.seenInput = req.Input
+	if p.err != nil {
+		return worker.LLMResponse{}, p.err
+	}
 	return p.response, nil
 }
 

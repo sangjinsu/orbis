@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -30,6 +31,20 @@ func main() {
 			slog.Error("server stopped", "error", err)
 			os.Exit(1)
 		}
+	case "ws":
+		if len(os.Args) < 3 || os.Args[2] != "smoke" {
+			printUsage()
+			os.Exit(2)
+		}
+		cfg, err := config.Load(".env")
+		if err != nil {
+			slog.Error("load config", "error", err)
+			os.Exit(1)
+		}
+		if err := runWSSmoke(context.Background(), smokeConfigFromEnv(cfg), os.Stdout); err != nil {
+			slog.Error("websocket smoke failed", "error", err)
+			os.Exit(1)
+		}
 	default:
 		printUsage()
 		os.Exit(2)
@@ -37,5 +52,5 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, "usage: orbis serve")
+	fmt.Fprintln(os.Stderr, "usage: orbis serve | orbis ws smoke")
 }

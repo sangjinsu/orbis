@@ -13,6 +13,10 @@
 - PR #9: WebSocket gateway
 - PR #10: app server runtime wiring
 - PR #11: WebSocket event broker
+- current: real LLM WebSocket smoke hardening
+  - added `orbis ws smoke` for `.env`-configured WebSocket smoke testing
+  - terminal runtime events now include `FinalAnswerEmitted`/`RunCompleted` or `LLMCallFailed`/`RunFailed`
+  - app runtime uses a per-session event queue to preserve publish and reducer ordering
 
 ## Remaining v0.1 Work
 
@@ -20,5 +24,5 @@
 - add timer worker and timeout/cancel wiring
 - implement `run.status`, `run.cancel`, `events.list`, and `session.create`
 - add replay from JSONL event logs
-- add manual WebSocket client documentation
-- verify with a real OpenAI API key from `.env`
+- expand manual WebSocket client documentation beyond the smoke CLI
+- keep real OpenAI `.env` WebSocket smoke as a release gate

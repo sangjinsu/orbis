@@ -1,4 +1,4 @@
-.PHONY: test run lint
+.PHONY: test run lint smoke
 
 test:
 	go test ./...
@@ -8,3 +8,6 @@ run:
 
 lint:
 	go test ./...
+
+smoke:
+	go run ./cmd/orbis ws smoke

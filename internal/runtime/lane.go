@@ -70,6 +70,9 @@ func (l *SessionLane) Handle(ctx context.Context, event domain.Event) error {
 	if err := l.store.SaveSession(ctx, result.NextState); err != nil {
 		return fmt.Errorf("save session: %w", err)
 	}
+	if err := l.saveRunState(ctx, result.NextState, event); err != nil {
+		return err
+	}
 
 	for _, action := range result.Actions {
 		if l.dispatcher == nil {
@@ -78,6 +81,34 @@ func (l *SessionLane) Handle(ctx context.Context, event domain.Event) error {
 		if err := l.dispatcher.Dispatch(ctx, action); err != nil {
 			return fmt.Errorf("dispatch action %s: %w", action.ActionID, err)
 		}
+	}
+	return nil
+}
+
+func (l *SessionLane) saveRunState(ctx context.Context, state domain.SessionState, event domain.Event) error {
+	if event.RunID == "" {
+		return nil
+	}
+	run, err := l.store.LoadRun(ctx, event.RunID)
+	if err != nil {
+		return fmt.Errorf("load run: %w", err)
+	}
+	if run.RunID == "" {
+		run.RunID = event.RunID
+	}
+	if run.SessionID == "" {
+		run.SessionID = event.SessionID
+	}
+	if run.CreatedAt.IsZero() {
+		run.CreatedAt = state.CreatedAt
+		if run.CreatedAt.IsZero() {
+			run.CreatedAt = event.CreatedAt
+		}
+	}
+	run.Status = state.RunStatus
+	run.UpdatedAt = event.CreatedAt
+	if err := l.store.SaveRun(ctx, run); err != nil {
+		return fmt.Errorf("save run: %w", err)
 	}
 	return nil
 }
