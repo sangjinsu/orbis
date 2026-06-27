@@ -16,13 +16,19 @@ import (
 
 type RuntimeServiceConfig struct {
 	Store       store.Store
+	Broker      EventBroker
 	LLMProvider worker.LLMProvider
 	Now         func() time.Time
 }
 
+type EventBroker interface {
+	Publish(event protocol.RuntimeEvent)
+}
+
 type RuntimeService struct {
-	store store.Store
-	now   func() time.Time
+	store  store.Store
+	broker EventBroker
+	now    func() time.Time
 
 	mu          sync.Mutex
 	lanes       map[string]*orbisruntime.SessionLane
@@ -42,6 +48,7 @@ func NewRuntimeService(cfg RuntimeServiceConfig) *RuntimeService {
 	}
 	service := &RuntimeService{
 		store:       cfg.Store,
+		broker:      cfg.Broker,
 		now:         now,
 		lanes:       map[string]*orbisruntime.SessionLane{},
 		llmProvider: cfg.LLMProvider,
@@ -124,8 +131,23 @@ func (s *RuntimeService) handleSessionMessage(ctx context.Context, req protocol.
 }
 
 func (s *RuntimeService) handleEvent(ctx context.Context, event domain.Event) error {
+	s.publish(event)
 	lane := s.laneFor(event.SessionID)
 	return lane.Handle(ctx, event)
+}
+
+func (s *RuntimeService) publish(event domain.Event) {
+	if s.broker == nil {
+		return
+	}
+	s.broker.Publish(protocol.RuntimeEvent{
+		Type:      "event",
+		Event:     string(event.Type),
+		Seq:       event.Seq,
+		SessionID: event.SessionID,
+		RunID:     event.RunID,
+		Payload:   event.Payload,
+	})
 }
 
 func (s *RuntimeService) laneFor(sessionID string) *orbisruntime.SessionLane {

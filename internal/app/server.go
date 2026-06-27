@@ -3,6 +3,7 @@ package app
 import (
 	"net/http"
 
+	"github.com/sangjinsu/orbis/internal/broker"
 	"github.com/sangjinsu/orbis/internal/config"
 	"github.com/sangjinsu/orbis/internal/gateway"
 	"github.com/sangjinsu/orbis/internal/store"
@@ -11,6 +12,7 @@ import (
 
 func NewHTTPServer(cfg config.Config) *http.Server {
 	fileStore := store.NewFileStore(cfg.DataDir)
+	eventBroker := broker.New()
 	provider := worker.NewOpenAIProvider(worker.OpenAIProviderConfig{
 		APIKey:  cfg.OpenAIAPIKey,
 		BaseURL: cfg.OpenAIBaseURL,
@@ -18,10 +20,11 @@ func NewHTTPServer(cfg config.Config) *http.Server {
 	})
 	runtime := NewRuntimeService(RuntimeServiceConfig{
 		Store:       fileStore,
+		Broker:      eventBroker,
 		LLMProvider: provider,
 	})
 	return &http.Server{
 		Addr:    cfg.Addr,
-		Handler: gateway.NewHTTPHandler(runtime),
+		Handler: gateway.NewHTTPHandler(runtime, gateway.WithBroker(eventBroker)),
 	}
 }
