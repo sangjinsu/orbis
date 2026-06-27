@@ -60,8 +60,11 @@ func NewHTTPServer(cfg config.Config) *http.Server {
 		RunTimeout: cfg.RunTimeout,
 	})
 	return &http.Server{
-		Addr:    cfg.Addr,
-		Handler: gateway.NewHTTPHandler(runtime, gateway.WithBroker(eventBroker)),
+		Addr: cfg.Addr,
+		Handler: gateway.NewHTTPHandler(runtime,
+			gateway.WithBroker(eventBroker),
+			gateway.WithReadTimeout(cfg.WSReadTimeout),
+		),
 	}
 }
 

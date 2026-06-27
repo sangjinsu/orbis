@@ -23,12 +23,21 @@ type Broker interface {
 type HandlerOption func(*handlerConfig)
 
 type handlerConfig struct {
-	broker Broker
+	broker      Broker
+	readTimeout time.Duration
 }
 
 func WithBroker(broker Broker) HandlerOption {
 	return func(cfg *handlerConfig) {
 		cfg.broker = broker
+	}
+}
+
+// WithReadTimeout bounds how long a single WebSocket read may block. Zero (the
+// default) disables it so idle subscriber connections are not closed.
+func WithReadTimeout(timeout time.Duration) HandlerOption {
+	return func(cfg *handlerConfig) {
+		cfg.readTimeout = timeout
 	}
 }
 
@@ -47,12 +56,12 @@ func NewHTTPHandler(runtime Runtime, opts ...HandlerOption) http.Handler {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	mux.HandleFunc("GET /ws", func(w http.ResponseWriter, r *http.Request) {
-		handleWebSocket(w, r, runtime, cfg.broker)
+		handleWebSocket(w, r, runtime, cfg.broker, cfg.readTimeout)
 	})
 	return mux
 }
 
-func handleWebSocket(w http.ResponseWriter, r *http.Request, runtime Runtime, broker Broker) {
+func handleWebSocket(w http.ResponseWriter, r *http.Request, runtime Runtime, broker Broker, readTimeout time.Duration) {
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		return
@@ -69,8 +78,8 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request, runtime Runtime, br
 	for {
 		readCtx := context.Background()
 		cancel := func() {}
-		if timeout := defaultReadTimeout(); timeout > 0 {
-			readCtx, cancel = context.WithTimeout(context.Background(), timeout)
+		if readTimeout > 0 {
+			readCtx, cancel = context.WithTimeout(context.Background(), readTimeout)
 		}
 		var req protocol.ClientRequest
 		err := wsjson.Read(readCtx, conn, &req)
@@ -103,10 +112,6 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request, runtime Runtime, br
 			Payload: payload,
 		})
 	}
-}
-
-func defaultReadTimeout() time.Duration {
-	return 0
 }
 
 type subscribeParams struct {

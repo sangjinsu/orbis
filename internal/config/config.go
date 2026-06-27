@@ -28,6 +28,10 @@ type Config struct {
 	ToolRetryInitialDelay  time.Duration
 	ToolRetryMaxDelay      time.Duration
 	ToolRetryBackoffFactor float64
+
+	// WSReadTimeout bounds how long a WebSocket read may block. 0 disables it,
+	// which is the default because subscriber connections idle between events.
+	WSReadTimeout time.Duration
 }
 
 func Load(path string) (Config, error) {
@@ -80,6 +84,10 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	wsReadTimeout, err := durationOrDefault(values, "ORBIS_WS_READ_TIMEOUT", 0)
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg := Config{
 		Addr:          valueOrDefault(values, "ORBIS_ADDR", ":8080"),
@@ -97,6 +105,8 @@ func Load(path string) (Config, error) {
 		ToolRetryInitialDelay:  toolRetryInitialDelay,
 		ToolRetryMaxDelay:      toolRetryMaxDelay,
 		ToolRetryBackoffFactor: toolRetryBackoffFactor,
+
+		WSReadTimeout: wsReadTimeout,
 	}
 
 	if err := cfg.Validate(); err != nil {
