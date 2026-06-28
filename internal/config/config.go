@@ -32,6 +32,14 @@ type Config struct {
 	// WSReadTimeout bounds how long a WebSocket read may block. 0 disables it,
 	// which is the default because subscriber connections idle between events.
 	WSReadTimeout time.Duration
+
+	// Skills (v1). Procedural knowledge loaded into the LLM context before
+	// planning. Enabled by default; disabling skips skill selection entirely.
+	SkillsEnabled       bool
+	SkillsDir           string
+	SkillsMaxSelected   int
+	SkillsMaxChars      int
+	SkillsReloadOnStart bool
 }
 
 func Load(path string) (Config, error) {
@@ -89,6 +97,23 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 
+	skillsEnabled, err := boolOrDefault(values, "ORBIS_SKILLS_ENABLED", true)
+	if err != nil {
+		return Config{}, err
+	}
+	skillsMaxSelected, err := intOrDefault(values, "ORBIS_SKILLS_MAX_SELECTED", 3)
+	if err != nil {
+		return Config{}, err
+	}
+	skillsMaxChars, err := intOrDefault(values, "ORBIS_SKILLS_MAX_CHARS", 12000)
+	if err != nil {
+		return Config{}, err
+	}
+	skillsReloadOnStart, err := boolOrDefault(values, "ORBIS_SKILLS_RELOAD_ON_START", true)
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
 		Addr:          valueOrDefault(values, "ORBIS_ADDR", ":8080"),
 		DataDir:       valueOrDefault(values, "ORBIS_DATA_DIR", "data"),
@@ -107,6 +132,12 @@ func Load(path string) (Config, error) {
 		ToolRetryBackoffFactor: toolRetryBackoffFactor,
 
 		WSReadTimeout: wsReadTimeout,
+
+		SkillsEnabled:       skillsEnabled,
+		SkillsDir:           valueOrDefault(values, "ORBIS_SKILLS_DIR", "data/skills"),
+		SkillsMaxSelected:   skillsMaxSelected,
+		SkillsMaxChars:      skillsMaxChars,
+		SkillsReloadOnStart: skillsReloadOnStart,
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -223,6 +254,18 @@ func floatOrDefault(values map[string]string, key string, fallback float64) (flo
 	parsed, err := strconv.ParseFloat(value, 64)
 	if err != nil {
 		return 0, fmt.Errorf("parse %s: %w", key, err)
+	}
+	return parsed, nil
+}
+
+func boolOrDefault(values map[string]string, key string, fallback bool) (bool, error) {
+	value := strings.TrimSpace(values[key])
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("parse %s: %w", key, err)
 	}
 	return parsed, nil
 }

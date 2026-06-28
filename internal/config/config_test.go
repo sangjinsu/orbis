@@ -103,6 +103,83 @@ func TestLoadToolDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadSkillDefaults(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	content := []byte("ORBIS_LLM_MODEL=gpt-test\nOPENAI_API_KEY=test-key\n")
+	if err := os.WriteFile(envPath, content, 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+
+	cfg, err := Load(envPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.SkillsEnabled {
+		t.Fatal("SkillsEnabled = false, want true by default")
+	}
+	if cfg.SkillsDir != "data/skills" {
+		t.Fatalf("SkillsDir = %q, want data/skills", cfg.SkillsDir)
+	}
+	if cfg.SkillsMaxSelected != 3 {
+		t.Fatalf("SkillsMaxSelected = %d, want 3", cfg.SkillsMaxSelected)
+	}
+	if cfg.SkillsMaxChars != 12000 {
+		t.Fatalf("SkillsMaxChars = %d, want 12000", cfg.SkillsMaxChars)
+	}
+	if !cfg.SkillsReloadOnStart {
+		t.Fatal("SkillsReloadOnStart = false, want true by default")
+	}
+}
+
+func TestLoadSkillOverrides(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	content := []byte(`ORBIS_LLM_MODEL=gpt-test
+OPENAI_API_KEY=test-key
+ORBIS_SKILLS_ENABLED=false
+ORBIS_SKILLS_DIR=/tmp/skills
+ORBIS_SKILLS_MAX_SELECTED=5
+ORBIS_SKILLS_MAX_CHARS=2000
+ORBIS_SKILLS_RELOAD_ON_START=false
+`)
+	if err := os.WriteFile(envPath, content, 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+
+	cfg, err := Load(envPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.SkillsEnabled {
+		t.Fatal("SkillsEnabled = true, want false")
+	}
+	if cfg.SkillsDir != "/tmp/skills" {
+		t.Fatalf("SkillsDir = %q, want /tmp/skills", cfg.SkillsDir)
+	}
+	if cfg.SkillsMaxSelected != 5 {
+		t.Fatalf("SkillsMaxSelected = %d, want 5", cfg.SkillsMaxSelected)
+	}
+	if cfg.SkillsMaxChars != 2000 {
+		t.Fatalf("SkillsMaxChars = %d, want 2000", cfg.SkillsMaxChars)
+	}
+	if cfg.SkillsReloadOnStart {
+		t.Fatal("SkillsReloadOnStart = true, want false")
+	}
+}
+
+func TestLoadRejectsInvalidSkillBool(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	content := []byte("ORBIS_LLM_MODEL=gpt-test\nOPENAI_API_KEY=test-key\nORBIS_SKILLS_ENABLED=maybe\n")
+	if err := os.WriteFile(envPath, content, 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+	if _, err := Load(envPath); err == nil {
+		t.Fatal("Load() error = nil, want error for invalid bool")
+	}
+}
+
 func TestLoadToolOverrides(t *testing.T) {
 	dir := t.TempDir()
 	envPath := filepath.Join(dir, ".env")
