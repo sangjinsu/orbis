@@ -440,7 +440,7 @@ func TestRuntimeServicePublishesLLMStartedBeforeProviderCompletes(t *testing.T) 
 		},
 	})
 
-	_, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
+	payload, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
 		Type:   "req",
 		ID:     "req_1",
 		Method: "session.message",
@@ -449,6 +449,7 @@ func TestRuntimeServicePublishesLLMStartedBeforeProviderCompletes(t *testing.T) 
 	if err != nil {
 		t.Fatalf("HandleClientRequest() error = %v", err)
 	}
+	ack := decodeAck(t, payload)
 
 	received := collectRuntimeEventsUntil(t, events, string(domain.EventLLMCallStarted))
 	seen := eventNames(received)
@@ -467,6 +468,15 @@ func TestRuntimeServicePublishesLLMStartedBeforeProviderCompletes(t *testing.T) 
 	if !containsEvent(received, string(domain.EventAssistantDelta)) {
 		t.Fatalf("events = %#v, want AssistantDelta", eventNames(received))
 	}
+
+	// The broker publishes events before the session lane persists them, so the
+	// observed RunCompleted does not yet guarantee the run record is on disk.
+	// Wait for the persisted terminal status (matching the sibling tests) so the
+	// run's background writes finish before t.TempDir cleanup runs.
+	waitFor(t, func() bool {
+		run, err := fileStore.LoadRun(ctx, ack.RunID)
+		return err == nil && run.Status == domain.RunCompleted
+	})
 }
 
 func TestRuntimeServiceCancelsRun(t *testing.T) {
