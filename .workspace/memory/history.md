@@ -123,6 +123,22 @@ FinalAnswerEmitted
 RunCompleted
 ```
 
+### Post-completion Hardening
+
+Follow-on cleanup and stabilization merged to `main` after the completion record:
+
+- PR #19: tidied the v0.2 tool-calling packages — removed the `store -> tool`
+  coupling (moved key sanitization into `store`), de-duplicated
+  `IsTerminalRunStatus` into `domain`, and extracted a shared tool-event payload
+  builder in the dispatcher. Pure refactor, no behavior change.
+- PR #20: fixed the flaky `TestRuntimeServicePublishesLLMStartedBeforeProviderCompletes`.
+  Because `handleEvent` publishes to the broker before the session lane persists,
+  observing `RunCompleted` on the broker did not guarantee the run record was on
+  disk, so the test could return while the lane goroutine was still writing to
+  `t.TempDir` — racing with `t.TempDir` cleanup (`directory not empty` under
+  `-race`). The test now waits for the persisted terminal status, matching the
+  sibling cancel/timeout tests. Test-only change; runtime behavior is unchanged.
+
 ### Follow-ups
 
 - v1 skills: skill store/selection/auto-creation, tool search, subagents.
