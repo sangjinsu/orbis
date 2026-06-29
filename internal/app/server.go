@@ -16,7 +16,9 @@ import (
 	"github.com/sangjinsu/orbis/internal/worker"
 )
 
-func NewHTTPServer(cfg config.Config) (*http.Server, error) {
+// NewHTTPServer builds the HTTP server and returns the runtime service so the
+// caller can drain it on shutdown (server.Shutdown then runtime.Close).
+func NewHTTPServer(cfg config.Config) (*http.Server, *RuntimeService, error) {
 	ensureDataDirs(cfg.DataDir)
 
 	fileStore := store.NewFileStore(cfg.DataDir)
@@ -37,7 +39,7 @@ func NewHTTPServer(cfg config.Config) (*http.Server, error) {
 	if cfg.SkillsEnabled {
 		skillStore, err := skill.NewStore(cfg.SkillsDir)
 		if err != nil {
-			return nil, fmt.Errorf("load skills from %s: %w", cfg.SkillsDir, err)
+			return nil, nil, fmt.Errorf("load skills from %s: %w", cfg.SkillsDir, err)
 		}
 		skillIndex = skillStore
 		skillBodies = skillStore
@@ -98,7 +100,7 @@ func NewHTTPServer(cfg config.Config) (*http.Server, error) {
 	return &http.Server{
 		Addr:    cfg.Addr,
 		Handler: gateway.NewHTTPHandler(runtime, handlerOpts...),
-	}, nil
+	}, runtime, nil
 }
 
 // ensureDataDirs creates the runtime data directories so the first write of each
