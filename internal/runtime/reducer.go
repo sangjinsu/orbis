@@ -26,6 +26,12 @@ type ReducerConfig struct {
 	SkillsEnabled bool
 	SkillIndex    skill.Index
 	SkillSelect   skill.SelectConfig
+
+	// ToolDenialContinuationMax bounds how many times a run may continue after a
+	// tool-policy rejection by feeding the denial back to the LLM instead of
+	// failing the run. The zero value (disabled) preserves the v0.2 behavior of
+	// failing the run on the first rejection.
+	ToolDenialContinuationMax int
 }
 
 type Reducer struct {
@@ -171,7 +177,7 @@ func (r Reducer) Apply(ctx context.Context, state domain.SessionState, event dom
 	case domain.EventToolCallFailed, domain.EventToolCallTimedOut:
 		return r.reduceToolFailure(next, event)
 	case domain.EventToolCallRejected:
-		return reduceToolRejected(next, event)
+		return r.reduceToolRejected(next, event)
 	case domain.EventTimerFired:
 		return r.reduceTimerFired(next, event)
 	case domain.EventFinalAnswerEmitted:
@@ -352,10 +358,22 @@ func (r Reducer) scheduleToolRetry(state domain.SessionState, event domain.Event
 	return ReduceResult{NextState: state, Events: []domain.Event{scheduled}, Actions: []domain.Action{action}}, nil
 }
 
-func reduceToolRejected(state domain.SessionState, event domain.Event) (ReduceResult, error) {
+func (r Reducer) reduceToolRejected(state domain.SessionState, event domain.Event) (ReduceResult, error) {
 	if domain.IsTerminalRunStatus(state.RunStatus) {
 		return ReduceResult{NextState: state}, nil
 	}
+	var payload ToolCallEventPayload
+	if len(event.Payload) > 0 {
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return ReduceResult{}, fmt.Errorf("decode tool rejected payload: %w", err)
+		}
+	}
+	// Continue the run by feeding the denial back to the LLM when continuation is
+	// enabled and the per-run budget remains; otherwise fail the run.
+	if r.cfg.ToolDenialContinuationMax > 0 && state.ToolDenialContinuations < r.cfg.ToolDenialContinuationMax {
+		return r.continueAfterDenial(state, event, payload)
+	}
+
 	state.RunStatus = domain.RunFailed
 	failPayload := event.Payload
 	if len(failPayload) == 0 {
@@ -372,6 +390,77 @@ func reduceToolRejected(state domain.SessionState, event domain.Event) (ReduceRe
 			Payload:   failPayload,
 		}},
 	}, nil
+}
+
+// continueAfterDenial records the rejection as a tool result and dispatches a
+// follow-up LLM call so the model can replan without the denied tool. The per-run
+// counter is the loop guard: each continuation increments it, and the run fails
+// once it reaches ToolDenialContinuationMax.
+func (r Reducer) continueAfterDenial(state domain.SessionState, event domain.Event, rejected ToolCallEventPayload) (ReduceResult, error) {
+	state.ToolDenialContinuations++
+	state.RunStatus = domain.RunWaitingLLM
+
+	denialText := toolDenialMessage(rejected)
+	state.MessageHistory = append(state.MessageHistory, domain.Message{
+		Role:       "tool",
+		Content:    denialText,
+		CreatedAt:  event.CreatedAt,
+		ToolCallID: rejected.ToolCallID,
+		ToolName:   rejected.Name,
+	})
+
+	actionPayload, err := json.Marshal(DispatchLLMCallPayload{
+		Input:          denialText,
+		Messages:       BuildLLMMessages(state),
+		SelectedSkills: state.SelectedSkills,
+	})
+	if err != nil {
+		return ReduceResult{}, fmt.Errorf("marshal denial continuation payload: %w", err)
+	}
+	action := domain.Action{
+		ActionID:       event.RunID + ":llm:" + event.EventID,
+		SessionID:      event.SessionID,
+		RunID:          event.RunID,
+		Type:           domain.ActionDispatchLLMCall,
+		IdempotencyKey: event.RunID + ":DispatchLLMCall:" + event.EventID,
+		Payload:        actionPayload,
+	}
+	if err := action.Validate(); err != nil {
+		return ReduceResult{}, err
+	}
+
+	continuedPayload, err := json.Marshal(ToolCallEventPayload{
+		ToolCallID: rejected.ToolCallID,
+		Name:       rejected.Name,
+		ReasonCode: rejected.ReasonCode,
+		Error:      rejected.Error,
+	})
+	if err != nil {
+		return ReduceResult{}, fmt.Errorf("marshal denial continued payload: %w", err)
+	}
+	continued := domain.Event{
+		EventID:   fmt.Sprintf("%s:denial_continued:%s:%d", event.RunID, rejected.ToolCallID, state.ToolDenialContinuations),
+		SessionID: event.SessionID,
+		RunID:     event.RunID,
+		Type:      domain.EventToolCallDenialContinued,
+		CreatedAt: event.CreatedAt,
+		Payload:   continuedPayload,
+	}
+	return ReduceResult{NextState: state, Events: []domain.Event{continued}, Actions: []domain.Action{action}}, nil
+}
+
+// toolDenialMessage renders a policy rejection as a short tool-result string the
+// LLM can act on: which tool was denied, why, and to try another approach.
+func toolDenialMessage(p ToolCallEventPayload) string {
+	reason := p.ReasonCode
+	if reason == "" {
+		reason = "denied"
+	}
+	msg := fmt.Sprintf("Tool call %q was denied (%s)", p.Name, reason)
+	if p.Error != "" {
+		msg += ": " + p.Error
+	}
+	return msg + ". Choose a different approach without this tool."
 }
 
 func (r Reducer) reduceUserMessage(state domain.SessionState, event domain.Event) (ReduceResult, error) {

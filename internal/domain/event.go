@@ -24,12 +24,15 @@ const (
 	EventToolCallRetried        EventType = "ToolCallRetried"
 	EventToolCallDeduplicated   EventType = "ToolCallDeduplicated"
 	EventToolCallTimedOut       EventType = "ToolCallTimedOut"
-	EventTimerFired             EventType = "TimerFired"
-	EventAssistantDelta         EventType = "AssistantDelta"
-	EventFinalAnswerEmitted     EventType = "FinalAnswerEmitted"
-	EventRunCompleted           EventType = "RunCompleted"
-	EventRunFailed              EventType = "RunFailed"
-	EventRunCancelled           EventType = "RunCancelled"
+	// EventToolCallDenialContinued is emitted when a policy-rejected tool call does
+	// not fail the run: the denial is fed back to the LLM to replan (v1.5).
+	EventToolCallDenialContinued EventType = "ToolCallDenialContinued"
+	EventTimerFired              EventType = "TimerFired"
+	EventAssistantDelta          EventType = "AssistantDelta"
+	EventFinalAnswerEmitted      EventType = "FinalAnswerEmitted"
+	EventRunCompleted            EventType = "RunCompleted"
+	EventRunFailed               EventType = "RunFailed"
+	EventRunCancelled            EventType = "RunCancelled"
 
 	// Skill lifecycle (v1). The reducer emits these from a pure in-memory
 	// selection before LLMCallStarted: one SkillSelected and one SkillLoaded per

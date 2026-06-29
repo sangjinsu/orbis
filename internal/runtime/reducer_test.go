@@ -433,6 +433,73 @@ func TestReducerToolRejectedFailsRun(t *testing.T) {
 	}
 }
 
+func TestReducerToolRejectedContinuesWhenBudgetRemains(t *testing.T) {
+	reducer := NewReducer(ReducerConfig{ToolDenialContinuationMax: 2})
+	now := time.Unix(1700000000, 0).UTC()
+	state := domain.SessionState{
+		SessionID: "session_1", CurrentRunID: "run_1", RunStatus: domain.RunWaitingTool,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	rejected, _ := json.Marshal(ToolCallEventPayload{
+		ToolCallID: "call_1", Name: "mock.dangerous", ReasonCode: "toolset_not_allowed", Error: "denied",
+	})
+	event := domain.Event{
+		EventID: "evt_tool_rejected", SessionID: "session_1", RunID: "run_1",
+		Type: domain.EventToolCallRejected, Seq: 4, CreatedAt: now, Payload: rejected,
+	}
+
+	result, err := reducer.Apply(context.Background(), state, event)
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if result.NextState.RunStatus != domain.RunWaitingLLM {
+		t.Fatalf("RunStatus = %q, want WAITING_LLM", result.NextState.RunStatus)
+	}
+	if result.NextState.ToolDenialContinuations != 1 {
+		t.Fatalf("ToolDenialContinuations = %d, want 1", result.NextState.ToolDenialContinuations)
+	}
+	if len(result.NextState.MessageHistory) != 1 || result.NextState.MessageHistory[0].Role != "tool" {
+		t.Fatalf("history = %#v, want one tool denial message", result.NextState.MessageHistory)
+	}
+	if len(result.Events) != 1 || result.Events[0].Type != domain.EventToolCallDenialContinued {
+		t.Fatalf("events = %#v, want one ToolCallDenialContinued", result.Events)
+	}
+	if len(result.Actions) != 1 || result.Actions[0].Type != domain.ActionDispatchLLMCall {
+		t.Fatalf("actions = %#v, want one DispatchLLMCall", result.Actions)
+	}
+}
+
+func TestReducerToolRejectedFailsWhenBudgetExhausted(t *testing.T) {
+	reducer := NewReducer(ReducerConfig{ToolDenialContinuationMax: 2})
+	now := time.Unix(1700000000, 0).UTC()
+	state := domain.SessionState{
+		SessionID: "session_1", CurrentRunID: "run_1", RunStatus: domain.RunWaitingTool,
+		ToolDenialContinuations: 2, // budget already spent
+		CreatedAt:               now, UpdatedAt: now,
+	}
+	rejected, _ := json.Marshal(ToolCallEventPayload{
+		ToolCallID: "call_1", Name: "mock.dangerous", ReasonCode: "toolset_not_allowed",
+	})
+	event := domain.Event{
+		EventID: "evt_tool_rejected_final", SessionID: "session_1", RunID: "run_1",
+		Type: domain.EventToolCallRejected, Seq: 5, CreatedAt: now, Payload: rejected,
+	}
+
+	result, err := reducer.Apply(context.Background(), state, event)
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if result.NextState.RunStatus != domain.RunFailed {
+		t.Fatalf("RunStatus = %q, want FAILED", result.NextState.RunStatus)
+	}
+	if len(result.Actions) != 0 {
+		t.Fatalf("actions len = %d, want 0", len(result.Actions))
+	}
+	if len(result.Events) != 1 || result.Events[0].Type != domain.EventRunFailed {
+		t.Fatalf("events = %#v, want one RunFailed", result.Events)
+	}
+}
+
 func TestReducerToolRetryTimerDispatchesToolCall(t *testing.T) {
 	reducer := Reducer{}
 	now := time.Unix(1700000000, 0).UTC()

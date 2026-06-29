@@ -223,3 +223,30 @@ func TestLoadRejectsInvalidToolDuration(t *testing.T) {
 		t.Fatal("Load() error = nil, want invalid duration error")
 	}
 }
+
+func TestLoadToolDenialContinuationMax(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+
+	if err := os.WriteFile(envPath, []byte("ORBIS_LLM_MODEL=gpt-test\nOPENAI_API_KEY=test-key\n"), 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+	cfg, err := Load(envPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.ToolDenialContinuationMax != 2 {
+		t.Fatalf("ToolDenialContinuationMax = %d, want default 2", cfg.ToolDenialContinuationMax)
+	}
+
+	if err := os.WriteFile(envPath, []byte("ORBIS_LLM_MODEL=gpt-test\nOPENAI_API_KEY=test-key\nORBIS_TOOL_DENIAL_CONTINUATION_MAX=0\n"), 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+	cfg, err = Load(envPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.ToolDenialContinuationMax != 0 {
+		t.Fatalf("ToolDenialContinuationMax = %d, want 0 override", cfg.ToolDenialContinuationMax)
+	}
+}

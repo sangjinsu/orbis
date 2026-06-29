@@ -77,10 +77,11 @@ func NewHTTPServer(cfg config.Config) (*http.Server, *RuntimeService, error) {
 		SkillBodies:  skillBodies,
 		SkillCatalog: skillCatalog,
 		ReducerConfig: orbisruntime.ReducerConfig{
-			ToolTimeout:   cfg.ToolTimeoutDefault,
-			Retry:         retryPolicy,
-			SkillsEnabled: cfg.SkillsEnabled,
-			SkillIndex:    skillIndex,
+			ToolTimeout:               cfg.ToolTimeoutDefault,
+			Retry:                     retryPolicy,
+			ToolDenialContinuationMax: cfg.ToolDenialContinuationMax,
+			SkillsEnabled:             cfg.SkillsEnabled,
+			SkillIndex:                skillIndex,
 			SkillSelect: skill.SelectConfig{
 				MaxSelected: cfg.SkillsMaxSelected,
 				MaxChars:    cfg.SkillsMaxChars,
