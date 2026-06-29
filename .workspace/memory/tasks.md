@@ -83,3 +83,51 @@ See `.workspace/memory/history.md` for the v0.2 completion record.
 
 - v1 skills: skill store/selection/auto-creation, tool search, subagents.
 - reconsider continuation-on-denial (feed reason back to LLM) once skills exist.
+
+## v1: Skill System & Context Builder
+
+Skills are reusable procedural knowledge injected into the LLM context before
+planning. A skill is not a tool and never executes a side effect. Selection is a
+pure, deterministic in-memory computation inside the reducer (no LLM, no disk
+I/O); the store is the only skill disk I/O; the dispatcher renders bodies.
+
+- `internal/skill`: `Metadata`/`Entry`, `Index`/`Bodies`, file store
+  (load/reload/snapshot/body/list/get), deterministic `Select` (trigger > name >
+  tag > related_tool > title, priority/id tiebreak, MaxSelected + MaxChars),
+  `BuildContext` (`<orbis_skills>`), event payloads. `domain.SkillRef`.
+- Reducer (`ReducerConfig` skill fields): selects once per run, emits
+  `SkillSelected`/`SkillLoaded`/`SkillApplied` (or `SkillSkipped`), sets
+  `SelectedSkills`, puts refs in `DispatchLLMCall`; reuses on tool-result
+  follow-ups. Dispatcher injects bodies into `LLMRequest.Instructions`. Lane
+  snapshots `SelectedSkills` into `data/runs/{id}.json`.
+- Gateway API (read-only): WS `skill.list`/`skill.get`/`skill.reload`; HTTP
+  `GET /skills`, `GET /skills/{skillID}`, `POST /skills/reload` (`gateway.WithSkills`).
+  `gateway`/`protocol` do not import `skill`; mapping lives in app.
+- `RuntimeService.Close()` graceful shutdown (drains background goroutines) was
+  added to remove a pre-existing test-quiescence flake.
+- Seed: `data/skills/index.json` + `websocket-runtime-test` (100),
+  `tool-calling-policy` (90), `go-reducer-pattern` (80).
+- Specs: `.spec/v1-skill-system.md`, `decisions/v1-skill-system-decisions.md`,
+  `docs/skills.md`. Config: `ORBIS_SKILLS_ENABLED/DIR/MAX_SELECTED/MAX_CHARS/RELOAD_ON_START`.
+- PRs: #22 (skill pkg), #23 (runtime integration), #24 (quiescence), #25 (gateway
+  API), PR4 (docs).
+
+## v1 Status
+
+Implemented; docs complete. Fresh main-branch verification:
+
+- `go test ./...`, `go test -race ./...`, `git diff --check`
+- live HTTP skill API smoke (3 seed skills, get/reload/404)
+- live runtime skill event stream reached `SkillApplied` -> `LLMCallStarted`
+
+Real-LLM run completion is **blocked** by a pre-existing tool-name bug: the
+OpenAI Responses API rejects tool names with dots (`time.now`, `math.add`,
+`mock.*`) against `^[a-zA-Z0-9_-]+$`, and the dispatcher advertises tool schemas
+on every LLM call. This blocks all real-LLM runs, not just skills. See
+`history.md` for the v1 record and the tool-naming follow-up.
+
+## Post-v1 Follow-ups
+
+- fix real-LLM tool naming (sanitize to `^[a-zA-Z0-9_-]+$` with round-trip
+  mapping, or rename tools to underscores); then run the v1 real-LLM acceptance.
+- wire `RuntimeService.Close()` into HTTP server shutdown.

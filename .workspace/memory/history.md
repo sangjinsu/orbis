@@ -145,3 +145,82 @@ Follow-on cleanup and stabilization merged to `main` after the completion record
 - Reconsider continuation-on-denial (feed the reason back to the LLM) once
   skills exist.
 - Collect real usage feedback before adopting OpenClaw/Hermes advanced features.
+
+## 2026-06-29: v1 Skill System & Context Builder Implemented
+
+Status: implemented (docs complete; real-LLM run completion blocked by a
+pre-existing tool-name bug — see Blocker)
+
+### Summary
+
+Orbis v1 introduced skills — reusable procedural knowledge loaded into the LLM
+context before planning. A skill is not a tool and never executes a side effect.
+Selection is a pure, deterministic in-memory computation inside the reducer (no
+LLM, no disk I/O); the store is the only skill disk I/O, and the dispatcher
+renders selected bodies into the request instructions. Delivered as four PRs plus
+one infrastructure fix.
+
+### Completed Scope
+
+- PR #22 — `internal/skill` package (Metadata/Entry, `Index`/`Bodies`, file store
+  with load/reload/snapshot/body/list/get, deterministic `Select`,
+  `<orbis_skills>` `BuildContext`, event payloads), `domain.SkillRef`, three seed
+  skills under `data/skills/`, and `ORBIS_SKILLS_*` config.
+- PR #23 — runtime integration: reducer selects once per run from an in-memory
+  snapshot, emits `SkillSelected`/`SkillLoaded`/`SkillApplied` (or `SkillSkipped`)
+  before `LLMCallStarted`, sets `SelectedSkills`; dispatcher injects bodies into
+  `LLMRequest.Instructions`; lane snapshots the run's skills; `orbis ws smoke
+  skill`. Disabled → byte-identical to v0.2.
+- PR #24 — `RuntimeService.Close()` graceful shutdown draining background
+  goroutines, removing a pre-existing test-quiescence flake (`go test ./...`).
+- PR #25 — read-only skill gateway API: WS `skill.list`/`skill.get`/`skill.reload`
+  and HTTP `GET /skills`, `GET /skills/{skillID}`, `POST /skills/reload`.
+- PR4 — docs (`docs/skills.md`, `.workspace/.spec/v1-skill-system.md`,
+  `.workspace/decisions/v1-skill-system-decisions.md`) and this record.
+
+### Verification Evidence
+
+```bash
+gofmt -l .
+go vet ./...
+go test ./...
+go test -race ./...
+git diff --check
+```
+
+Live HTTP skill API (real server, seed data): `GET /skills` → 3 skills
+(priority 100/90/80), `GET /skills/{id}` → body + content_hash, unknown → 404,
+`POST /skills/reload` → `{"count":3}`.
+
+Live runtime skill event stream (`orbis ws smoke skill`, real server) confirmed
+the skill lifecycle end-to-end before the LLM call:
+
+```text
+UserMessageReceived
+RunStarted
+RunStatusChanged
+SkillSelected
+SkillLoaded
+SkillApplied
+LLMCallStarted
+```
+
+### Blocker (pre-existing, not a skill issue)
+
+The `orbis ws smoke skill` run reached `LLMCallStarted` then `LLMCallFailed` ->
+`RunFailed`. The OpenAI Responses API rejected the request with
+`Invalid 'tools[1].name': ... pattern '^[a-zA-Z0-9_-]+$'`. The cause is that
+mock tool names contain a dot (`time.now`, `math.add`, `mock.*`) and
+`buildResponsesTools`/`buildResponsesInput` send them verbatim. The dispatcher
+advertises tool schemas on every LLM call, so this blocks all real-LLM runs
+(tool and non-tool alike), independent of skills. Skill selection, events,
+ordering, and instruction injection all ran correctly up to the LLM call.
+
+### Follow-ups
+
+- [ ] Fix real-LLM tool naming: sanitize tool names to `^[a-zA-Z0-9_-]+$` when
+  advertising to the Responses API (and map back on `function_call` output), or
+  rename tools to use underscores. Then re-run `orbis ws smoke skill` and the
+  documented prompts for the v1 real-LLM acceptance.
+- [ ] Wire `RuntimeService.Close()` into HTTP server shutdown.
+- [ ] v1.5/v2: auto skill creation, learning loop, vector search, subagents, MCP.
