@@ -109,25 +109,29 @@ I/O); the store is the only skill disk I/O; the dispatcher renders bodies.
   `tool-calling-policy` (90), `go-reducer-pattern` (80).
 - Specs: `.spec/v1-skill-system.md`, `decisions/v1-skill-system-decisions.md`,
   `docs/skills.md`. Config: `ORBIS_SKILLS_ENABLED/DIR/MAX_SELECTED/MAX_CHARS/RELOAD_ON_START`.
+- Provider boundary sanitizes tool names to `^[a-zA-Z0-9_-]+$` for the OpenAI
+  Responses API and maps `function_call` responses back to the registered name
+  (registry/policy/events keep dotted names like `math.add`).
 - PRs: #22 (skill pkg), #23 (runtime integration), #24 (quiescence), #25 (gateway
-  API), PR4 (docs).
+  API), #26 (docs), #27 (Responses API tool-name sanitize).
 
 ## v1 Status
 
-Implemented; docs complete. Fresh main-branch verification:
+Completed on 2026-06-29. Fresh main-branch verification:
 
 - `go test ./...`, `go test -race ./...`, `git diff --check`
 - live HTTP skill API smoke (3 seed skills, get/reload/404)
-- live runtime skill event stream reached `SkillApplied` -> `LLMCallStarted`
+- real-LLM acceptance: `orbis ws smoke skill` and `orbis ws smoke tool` both
+  reached `RunCompleted` (the tool smoke via a `math.add` round-trip call)
 
-Real-LLM run completion is **blocked** by a pre-existing tool-name bug: the
-OpenAI Responses API rejects tool names with dots (`time.now`, `math.add`,
-`mock.*`) against `^[a-zA-Z0-9_-]+$`, and the dispatcher advertises tool schemas
-on every LLM call. This blocks all real-LLM runs, not just skills. See
-`history.md` for the v1 record and the tool-naming follow-up.
+The earlier real-LLM blocker (OpenAI Responses API rejecting dotted tool names)
+was fixed in PR #27 by sanitizing names at the provider boundary with a
+`function_call` response round-trip. See `history.md` for the v1 completion
+record.
 
 ## Post-v1 Follow-ups
 
-- fix real-LLM tool naming (sanitize to `^[a-zA-Z0-9_-]+$` with round-trip
-  mapping, or rename tools to underscores); then run the v1 real-LLM acceptance.
+- done: real-LLM tool naming fixed in PR #27 (provider-boundary sanitize +
+  round-trip); v1 real-LLM acceptance passed on `main`.
 - wire `RuntimeService.Close()` into HTTP server shutdown.
+- v1.5/v2: auto skill creation, learning loop, vector search, subagents, MCP.

@@ -146,10 +146,10 @@ Follow-on cleanup and stabilization merged to `main` after the completion record
   skills exist.
 - Collect real usage feedback before adopting OpenClaw/Hermes advanced features.
 
-## 2026-06-29: v1 Skill System & Context Builder Implemented
+## 2026-06-29: v1 Skill System & Context Builder Completed
 
-Status: implemented (docs complete; real-LLM run completion blocked by a
-pre-existing tool-name bug — see Blocker)
+Status: completed (all acceptance items met, including real-LLM verification on
+`main`; the tool-name blocker was fixed in PR #27)
 
 ### Summary
 
@@ -175,8 +175,11 @@ one infrastructure fix.
   goroutines, removing a pre-existing test-quiescence flake (`go test ./...`).
 - PR #25 — read-only skill gateway API: WS `skill.list`/`skill.get`/`skill.reload`
   and HTTP `GET /skills`, `GET /skills/{skillID}`, `POST /skills/reload`.
-- PR4 — docs (`docs/skills.md`, `.workspace/.spec/v1-skill-system.md`,
+- PR #26 — docs (`docs/skills.md`, `.workspace/.spec/v1-skill-system.md`,
   `.workspace/decisions/v1-skill-system-decisions.md`) and this record.
+- PR #27 — sanitize tool names for the OpenAI Responses API (`^[a-zA-Z0-9_-]+$`)
+  at the provider boundary with a `function_call` response round-trip, unblocking
+  all real-LLM runs.
 
 ### Verification Evidence
 
@@ -192,8 +195,9 @@ Live HTTP skill API (real server, seed data): `GET /skills` → 3 skills
 (priority 100/90/80), `GET /skills/{id}` → body + content_hash, unknown → 404,
 `POST /skills/reload` → `{"count":3}`.
 
-Live runtime skill event stream (`orbis ws smoke skill`, real server) confirmed
-the skill lifecycle end-to-end before the LLM call:
+Real-LLM acceptance on `main` (after PR #27) — both smokes reach `RunCompleted`:
+
+`orbis ws smoke skill`:
 
 ```text
 UserMessageReceived
@@ -203,24 +207,34 @@ SkillSelected
 SkillLoaded
 SkillApplied
 LLMCallStarted
+AssistantDelta
+LLMResponseReceived
+FinalAnswerEmitted
+RunCompleted
 ```
 
-### Blocker (pre-existing, not a skill issue)
+`orbis ws smoke tool` additionally drove a tool call through the round-trip
+(`math_add` on the wire -> mapped back to `math.add` -> `ToolCallStarted` ->
+`ToolCallSucceeded` -> `RunCompleted`).
 
-The `orbis ws smoke skill` run reached `LLMCallStarted` then `LLMCallFailed` ->
-`RunFailed`. The OpenAI Responses API rejected the request with
-`Invalid 'tools[1].name': ... pattern '^[a-zA-Z0-9_-]+$'`. The cause is that
-mock tool names contain a dot (`time.now`, `math.add`, `mock.*`) and
-`buildResponsesTools`/`buildResponsesInput` send them verbatim. The dispatcher
-advertises tool schemas on every LLM call, so this blocks all real-LLM runs
-(tool and non-tool alike), independent of skills. Skill selection, events,
+### Blocker found and resolved (PR #27, not a skill issue)
+
+The first `orbis ws smoke skill` run reached `LLMCallStarted` then
+`LLMCallFailed` -> `RunFailed`. The OpenAI Responses API rejected the request
+with `Invalid 'tools[1].name': ... pattern '^[a-zA-Z0-9_-]+$'`. The cause was
+that mock tool names contain a dot (`time.now`, `math.add`, `mock.*`) and
+`buildResponsesTools`/`buildResponsesInput` sent them verbatim. The dispatcher
+advertises tool schemas on every LLM call, so this blocked all real-LLM runs
+(tool and non-tool alike), independent of skills — skill selection, events,
 ordering, and instruction injection all ran correctly up to the LLM call.
+Fixed in PR #27 by sanitizing names to the pattern at the provider boundary and
+mapping `function_call` responses back to the registered name; both smokes then
+reached `RunCompleted` on `main`.
 
 ### Follow-ups
 
-- [ ] Fix real-LLM tool naming: sanitize tool names to `^[a-zA-Z0-9_-]+$` when
-  advertising to the Responses API (and map back on `function_call` output), or
-  rename tools to use underscores. Then re-run `orbis ws smoke skill` and the
-  documented prompts for the v1 real-LLM acceptance.
+- [x] Fix real-LLM tool naming — done in PR #27 (provider-boundary sanitize +
+  `function_call` response round-trip); `orbis ws smoke skill`/`tool` verified on
+  `main`.
 - [ ] Wire `RuntimeService.Close()` into HTTP server shutdown.
 - [ ] v1.5/v2: auto skill creation, learning loop, vector search, subagents, MCP.
