@@ -206,6 +206,26 @@ func TestSelectSkipsInactive(t *testing.T) {
 	}
 }
 
+func TestSelectScoresAvailableRelatedTools(t *testing.T) {
+	// Text matches nothing, but the tool skill's related tool (math.add) is enabled
+	// for the run, so the availability signal selects it.
+	in := SelectionInput{Text: "completely unrelated gardening question", ToolNames: []string{"math.add"}}
+	sel := Select(entries(), in, SelectConfig{MaxSelected: 3})
+	if got := ids(sel); len(got) != 1 || got[0] != "tool" {
+		t.Fatalf("selected = %v, want [tool] from tool availability", got)
+	}
+	if !strings.Contains(sel[0].Reason, "tool_available") {
+		t.Fatalf("reason = %q, want it to mention tool_available", sel[0].Reason)
+	}
+
+	// Without the available tool the same query matches nothing (no regression to
+	// the text-only path).
+	none := Select(entries(), SelectionInput{Text: "completely unrelated gardening question"}, SelectConfig{MaxSelected: 3})
+	if len(none) != 0 {
+		t.Fatalf("selected = %v, want empty without available tools", ids(none))
+	}
+}
+
 func TestBuildContextIncludesContentAndDelimits(t *testing.T) {
 	out := BuildContext([]string{"# Alpha\nbody", "# Beta\nbody"})
 	if !strings.HasPrefix(out, "<orbis_skills>") || !strings.HasSuffix(out, "</orbis_skills>") {

@@ -26,6 +26,10 @@ type ReducerConfig struct {
 	SkillsEnabled bool
 	SkillIndex    skill.Index
 	SkillSelect   skill.SelectConfig
+	// ToolNames are the tool names enabled for the run. Skill selection boosts
+	// skills whose related tools are in this set, so the available toolset nudges
+	// which procedural knowledge is loaded.
+	ToolNames []string
 
 	// ToolDenialContinuationMax bounds how many times a run may continue after a
 	// tool-policy rejection by feeding the denial back to the LLM instead of
@@ -552,7 +556,7 @@ func (r Reducer) selectSkills(event domain.Event, text string) ([]domain.SkillRe
 		return nil, nil, nil
 	}
 
-	selected := skill.Select(r.cfg.SkillIndex.Snapshot(), skill.SelectionInput{Text: text}, r.cfg.SkillSelect)
+	selected := skill.Select(r.cfg.SkillIndex.Snapshot(), skill.SelectionInput{Text: text, ToolNames: r.cfg.ToolNames}, r.cfg.SkillSelect)
 	if len(selected) == 0 {
 		skipped, err := skillEvent(event, domain.EventSkillSkipped, ":skill_skipped", skill.SkillEventPayload{})
 		if err != nil {
