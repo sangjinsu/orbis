@@ -48,7 +48,19 @@ type RuntimeService struct {
 	runMu      sync.Mutex
 	activeRuns map[string]*runExecution
 	runTimeout time.Duration
+
+	// Lifecycle: quit signals background goroutines to stop, wg tracks the
+	// session-queue and dispatch goroutines, and closing (under lifecycleMu)
+	// gates new goroutine spawns so Close can wait without racing wg.Add.
+	lifecycleMu sync.Mutex
+	closing     bool
+	quit        chan struct{}
+	wg          sync.WaitGroup
 }
+
+// errRuntimeClosed is returned by Enqueue once Close has begun, so late events
+// from draining goroutines are dropped instead of panicking on a closed runtime.
+var errRuntimeClosed = errors.New("runtime service is closed")
 
 const sessionEventQueueSize = 128
 
@@ -97,6 +109,7 @@ func NewRuntimeService(cfg RuntimeServiceConfig) *RuntimeService {
 		reducerCfg:  cfg.ReducerConfig,
 		activeRuns:  map[string]*runExecution{},
 		runTimeout:  cfg.RunTimeout,
+		quit:        make(chan struct{}),
 	}
 	service.dispatcher = orbisruntime.NewDispatcher(orbisruntime.DispatcherConfig{
 		LLMProvider: cfg.LLMProvider,
@@ -107,6 +120,54 @@ func NewRuntimeService(cfg RuntimeServiceConfig) *RuntimeService {
 		Now:         now,
 	})
 	return service
+}
+
+// goTrack starts fn in a tracked goroutine unless the service is closing. It
+// returns false without starting fn once Close has begun. Checking closing and
+// calling wg.Add under lifecycleMu makes the spawn atomic with respect to Close,
+// so Close can wait on wg without racing a concurrent Add from zero.
+func (s *RuntimeService) goTrack(fn func()) bool {
+	s.lifecycleMu.Lock()
+	if s.closing {
+		s.lifecycleMu.Unlock()
+		return false
+	}
+	s.wg.Add(1)
+	s.lifecycleMu.Unlock()
+	go func() {
+		defer s.wg.Done()
+		fn()
+	}()
+	return true
+}
+
+// Close stops accepting new work, cancels in-flight runs, and waits for all
+// background session-queue and dispatch goroutines to finish. Background store
+// writes happen only inside those goroutines, so after Close no write can land —
+// tests defer Close so writes complete before t.TempDir cleanup runs. Close is
+// safe to call more than once; the service must not be reused afterward.
+func (s *RuntimeService) Close() {
+	s.lifecycleMu.Lock()
+	if s.closing {
+		s.lifecycleMu.Unlock()
+		return
+	}
+	s.closing = true
+	close(s.quit)
+	s.lifecycleMu.Unlock()
+
+	// Cancel in-flight runs (and stop their timers) so dispatch goroutines blocked
+	// on a provider stream unblock promptly instead of waiting out the run timeout.
+	s.runMu.Lock()
+	for _, exec := range s.activeRuns {
+		if exec.timer != nil {
+			exec.timer.Stop()
+		}
+		exec.cancel()
+	}
+	s.runMu.Unlock()
+
+	s.wg.Wait()
 }
 
 func (s *RuntimeService) HandleClientRequest(ctx context.Context, req protocol.ClientRequest) (json.RawMessage, error) {
@@ -133,12 +194,19 @@ func (s *RuntimeService) Enqueue(ctx context.Context, event domain.Event) error 
 	if event.SessionID == "" {
 		return fmt.Errorf("event session_id is required")
 	}
+	select {
+	case <-s.quit:
+		return errRuntimeClosed
+	default:
+	}
 	queue := s.eventQueueFor(event.SessionID)
 	select {
 	case queue <- event:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-s.quit:
+		return errRuntimeClosed
 	}
 }
 
@@ -340,13 +408,13 @@ func (s *RuntimeService) handleEvent(ctx context.Context, event domain.Event) er
 	}
 	for _, action := range result.Actions {
 		action := action
-		go func() {
+		s.goTrack(func() {
 			ctx := s.runContext(action.RunID)
 			if err := ctx.Err(); err != nil {
 				return
 			}
 			_ = s.dispatcher.Dispatch(ctx, action)
-		}()
+		})
 	}
 	if event.Type == domain.EventTimerFired {
 		s.clearRun(event.RunID)
@@ -493,12 +561,17 @@ func (s *RuntimeService) eventQueueFor(sessionID string) chan domain.Event {
 	}
 	queue := make(chan domain.Event, sessionEventQueueSize)
 	s.eventQueues[sessionID] = queue
-	go s.runSessionEventQueue(queue)
+	s.goTrack(func() { s.runSessionEventQueue(queue) })
 	return queue
 }
 
 func (s *RuntimeService) runSessionEventQueue(events <-chan domain.Event) {
-	for event := range events {
-		_ = s.handleEvent(context.Background(), event)
+	for {
+		select {
+		case event := <-events:
+			_ = s.handleEvent(context.Background(), event)
+		case <-s.quit:
+			return
+		}
 	}
 }

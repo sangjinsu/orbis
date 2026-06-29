@@ -47,6 +47,7 @@ func TestRuntimeServiceHandlesSessionMessageAsBackgroundEvent(t *testing.T) {
 			return time.Unix(1700000000, 0).UTC()
 		},
 	})
+	defer service.Close()
 
 	payload, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
 		Type:   "req",
@@ -103,6 +104,7 @@ func TestRuntimeServicePublishesProgressEvents(t *testing.T) {
 			return time.Unix(1700000000, 0).UTC()
 		},
 	})
+	defer service.Close()
 
 	_, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
 		Type:   "req",
@@ -146,6 +148,7 @@ func TestRuntimeServicePublishesTerminalFailureAfterProviderError(t *testing.T) 
 			return time.Unix(1700000000, 0).UTC()
 		},
 	})
+	defer service.Close()
 
 	payload, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
 		Type:   "req",
@@ -201,6 +204,7 @@ func TestRuntimeServiceSupportsSessionCreateRunStatusAndEventsList(t *testing.T)
 			return time.Unix(1700000000, 0).UTC()
 		},
 	})
+	defer service.Close()
 
 	createPayload, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
 		Type:   "req",
@@ -313,6 +317,7 @@ func TestRuntimeServiceRunsMockToolCallThenFinalAnswer(t *testing.T) {
 			return time.Unix(1700000000, 0).UTC()
 		},
 	})
+	defer service.Close()
 
 	payload, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
 		Type:   "req",
@@ -389,6 +394,7 @@ func TestRuntimeServiceRetriesFailedToolThenCompletes(t *testing.T) {
 		},
 		Now: func() time.Time { return time.Unix(1700000000, 0).UTC() },
 	})
+	defer service.Close()
 
 	if _, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
 		Type:   "req",
@@ -439,6 +445,7 @@ func TestRuntimeServicePublishesLLMStartedBeforeProviderCompletes(t *testing.T) 
 			return time.Unix(1700000000, 0).UTC()
 		},
 	})
+	defer service.Close()
 
 	payload, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
 		Type:   "req",
@@ -494,6 +501,7 @@ func TestRuntimeServiceCancelsRun(t *testing.T) {
 			return time.Unix(1700000000, 0).UTC()
 		},
 	})
+	defer service.Close()
 
 	payload, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
 		Type:   "req",
@@ -554,6 +562,7 @@ func TestRuntimeServiceTimesOutRunWithTimerFired(t *testing.T) {
 			return time.Unix(1700000000, 0).UTC()
 		},
 	})
+	defer service.Close()
 
 	payload, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
 		Type:   "req",
