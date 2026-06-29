@@ -25,4 +25,8 @@ type SessionState struct {
 	LastEventSeq   int64     `json:"last_event_seq"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
+	// SelectedSkills records the skills the reducer chose for the current run so
+	// follow-up LLM calls (after tool results) reuse the same set without
+	// re-selecting, keeping the prompt stable across a run.
+	SelectedSkills []SkillRef `json:"selected_skills,omitempty"`
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/sangjinsu/orbis/internal/domain"
@@ -67,6 +68,79 @@ func TestDispatcherRoutesLLMActionToProviderAndEnqueuesResultEvents(t *testing.T
 	}
 	if result.Text != "hello" || result.ProviderResponseID != "resp_1" {
 		t.Fatalf("result = %#v, want hello/resp_1", result)
+	}
+}
+
+func TestDispatcherInjectsSelectedSkillBodiesAsInstructions(t *testing.T) {
+	sink := &recordingEventSink{}
+	provider := &fakeLLMProvider{streamEvents: []worker.LLMStreamEvent{
+		{Delta: "ok", ProviderResponseID: "resp_1"},
+		{Done: true, ProviderResponseID: "resp_1"},
+	}}
+	bodies := fakeSkillBodies{"ws-test": "WebSocket runtime test body"}
+	dispatcher := NewDispatcher(DispatcherConfig{
+		LLMProvider: provider,
+		SkillBodies: bodies,
+		EventSink:   sink,
+	})
+
+	payload, err := json.Marshal(DispatchLLMCallPayload{
+		Input:          "how do I test?",
+		SelectedSkills: []domain.SkillRef{{ID: "ws-test", Name: "ws"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	action := domain.Action{
+		ActionID:       "act_1",
+		SessionID:      "session_1",
+		RunID:          "run_1",
+		Type:           domain.ActionDispatchLLMCall,
+		IdempotencyKey: "run_1:llm:act_1",
+		Payload:        payload,
+	}
+
+	if err := dispatcher.Dispatch(context.Background(), action); err != nil {
+		t.Fatalf("Dispatch() error = %v", err)
+	}
+	if !strings.Contains(provider.seenInstructions, "<orbis_skills>") {
+		t.Fatalf("instructions = %q, want <orbis_skills> block", provider.seenInstructions)
+	}
+	if !strings.Contains(provider.seenInstructions, "WebSocket runtime test body") {
+		t.Fatalf("instructions = %q, want skill body text", provider.seenInstructions)
+	}
+}
+
+func TestDispatcherLeavesInstructionsEmptyWithoutSelectedSkills(t *testing.T) {
+	sink := &recordingEventSink{}
+	provider := &fakeLLMProvider{streamEvents: []worker.LLMStreamEvent{
+		{Delta: "ok"},
+		{Done: true},
+	}}
+	dispatcher := NewDispatcher(DispatcherConfig{
+		LLMProvider: provider,
+		SkillBodies: fakeSkillBodies{"ws-test": "body"},
+		EventSink:   sink,
+	})
+
+	payload, err := json.Marshal(DispatchLLMCallPayload{Input: "hi"})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	action := domain.Action{
+		ActionID:       "act_1",
+		SessionID:      "session_1",
+		RunID:          "run_1",
+		Type:           domain.ActionDispatchLLMCall,
+		IdempotencyKey: "run_1:llm:act_1",
+		Payload:        payload,
+	}
+
+	if err := dispatcher.Dispatch(context.Background(), action); err != nil {
+		t.Fatalf("Dispatch() error = %v", err)
+	}
+	if provider.seenInstructions != "" {
+		t.Fatalf("instructions = %q, want empty without selected skills", provider.seenInstructions)
 	}
 }
 
@@ -287,10 +361,19 @@ func (s *recordingEventSink) Enqueue(ctx context.Context, event domain.Event) er
 }
 
 type fakeLLMProvider struct {
-	response     worker.LLMResponse
-	streamEvents []worker.LLMStreamEvent
-	err          error
-	seenInput    string
+	response         worker.LLMResponse
+	streamEvents     []worker.LLMStreamEvent
+	err              error
+	seenInput        string
+	seenInstructions string
+}
+
+// fakeSkillBodies is an in-memory skill.Bodies for dispatcher tests.
+type fakeSkillBodies map[string]string
+
+func (f fakeSkillBodies) Body(id string) (string, bool) {
+	body, ok := f[id]
+	return body, ok
 }
 
 type fakeToolRunner struct {
@@ -307,6 +390,7 @@ func (r *fakeToolRunner) Run(ctx context.Context, req worker.ToolRequest) worker
 func (p *fakeLLMProvider) Complete(ctx context.Context, req worker.LLMRequest) (worker.LLMResponse, error) {
 	_ = ctx
 	p.seenInput = req.Input
+	p.seenInstructions = req.Instructions
 	if p.err != nil {
 		return worker.LLMResponse{}, p.err
 	}
@@ -315,6 +399,7 @@ func (p *fakeLLMProvider) Complete(ctx context.Context, req worker.LLMRequest) (
 
 func (p *fakeLLMProvider) Stream(ctx context.Context, req worker.LLMRequest) (<-chan worker.LLMStreamEvent, error) {
 	p.seenInput = req.Input
+	p.seenInstructions = req.Instructions
 	if p.err != nil {
 		return nil, p.err
 	}

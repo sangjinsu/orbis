@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -9,12 +10,13 @@ import (
 	"github.com/sangjinsu/orbis/internal/config"
 	"github.com/sangjinsu/orbis/internal/gateway"
 	orbisruntime "github.com/sangjinsu/orbis/internal/runtime"
+	"github.com/sangjinsu/orbis/internal/skill"
 	"github.com/sangjinsu/orbis/internal/store"
 	"github.com/sangjinsu/orbis/internal/tool"
 	"github.com/sangjinsu/orbis/internal/worker"
 )
 
-func NewHTTPServer(cfg config.Config) *http.Server {
+func NewHTTPServer(cfg config.Config) (*http.Server, error) {
 	ensureDataDirs(cfg.DataDir)
 
 	fileStore := store.NewFileStore(cfg.DataDir)
@@ -24,6 +26,21 @@ func NewHTTPServer(cfg config.Config) *http.Server {
 		BaseURL: cfg.OpenAIBaseURL,
 		Model:   cfg.LLMModel,
 	})
+
+	// Load the skill store once at startup; the reducer selects from its
+	// in-memory snapshot and the dispatcher renders bodies, so this is the only
+	// skill disk I/O. When skills are disabled the index/bodies stay nil and the
+	// reducer skips selection, preserving v0.2 behavior.
+	var skillIndex skill.Index
+	var skillBodies skill.Bodies
+	if cfg.SkillsEnabled {
+		skillStore, err := skill.NewStore(cfg.SkillsDir)
+		if err != nil {
+			return nil, fmt.Errorf("load skills from %s: %w", cfg.SkillsDir, err)
+		}
+		skillIndex = skillStore
+		skillBodies = skillStore
+	}
 
 	registry := tool.NewRegistry()
 	_ = tool.RegisterMockTools(registry, nil)
@@ -53,9 +70,16 @@ func NewHTTPServer(cfg config.Config) *http.Server {
 		LLMProvider: provider,
 		ToolRunner:  toolWorker,
 		ToolSchemas: registry.SchemasForLLM(enabledToolsets),
+		SkillBodies: skillBodies,
 		ReducerConfig: orbisruntime.ReducerConfig{
-			ToolTimeout: cfg.ToolTimeoutDefault,
-			Retry:       retryPolicy,
+			ToolTimeout:   cfg.ToolTimeoutDefault,
+			Retry:         retryPolicy,
+			SkillsEnabled: cfg.SkillsEnabled,
+			SkillIndex:    skillIndex,
+			SkillSelect: skill.SelectConfig{
+				MaxSelected: cfg.SkillsMaxSelected,
+				MaxChars:    cfg.SkillsMaxChars,
+			},
 		},
 		RunTimeout: cfg.RunTimeout,
 	})
@@ -65,7 +89,7 @@ func NewHTTPServer(cfg config.Config) *http.Server {
 			gateway.WithBroker(eventBroker),
 			gateway.WithReadTimeout(cfg.WSReadTimeout),
 		),
-	}
+	}, nil
 }
 
 // ensureDataDirs creates the runtime data directories so the first write of each

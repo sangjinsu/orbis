@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sangjinsu/orbis/internal/domain"
+	"github.com/sangjinsu/orbis/internal/skill"
 	"github.com/sangjinsu/orbis/internal/tool"
 	"github.com/sangjinsu/orbis/internal/worker"
 )
@@ -16,6 +17,15 @@ import (
 type ReducerConfig struct {
 	ToolTimeout time.Duration
 	Retry       tool.RetryPolicy
+
+	// Skills (v1). When SkillsEnabled is true and SkillIndex is set, the reducer
+	// selects skills once per run from an immutable in-memory snapshot — a pure,
+	// deterministic computation with no I/O — and emits skill lifecycle events.
+	// The zero value (disabled, nil index) preserves the v0.2 behavior of
+	// skipping skill selection entirely.
+	SkillsEnabled bool
+	SkillIndex    skill.Index
+	SkillSelect   skill.SelectConfig
 }
 
 type Reducer struct {
@@ -55,6 +65,10 @@ type UserMessagePayload struct {
 type DispatchLLMCallPayload struct {
 	Input    string              `json:"input"`
 	Messages []worker.LLMMessage `json:"messages,omitempty"`
+	// SelectedSkills are the skills the reducer chose for this run. The dispatcher
+	// resolves their bodies from the in-memory store and renders them into the
+	// LLM request Instructions; the reducer never carries body text itself.
+	SelectedSkills []domain.SkillRef `json:"selected_skills,omitempty"`
 }
 
 type RunStatusChangedPayload struct {
@@ -147,13 +161,13 @@ func (r Reducer) Apply(ctx context.Context, state domain.SessionState, event dom
 
 	switch event.Type {
 	case domain.EventUserMessageReceived:
-		return reduceUserMessage(next, event)
+		return r.reduceUserMessage(next, event)
 	case domain.EventLLMResponseReceived:
 		return r.reduceLLMResponse(next, event)
 	case domain.EventLLMCallFailed:
 		return reduceFailure(next, event)
 	case domain.EventToolCallSucceeded:
-		return reduceToolCallSucceeded(next, event)
+		return r.reduceToolCallSucceeded(next, event)
 	case domain.EventToolCallFailed, domain.EventToolCallTimedOut:
 		return r.reduceToolFailure(next, event)
 	case domain.EventToolCallRejected:
@@ -360,7 +374,7 @@ func reduceToolRejected(state domain.SessionState, event domain.Event) (ReduceRe
 	}, nil
 }
 
-func reduceUserMessage(state domain.SessionState, event domain.Event) (ReduceResult, error) {
+func (r Reducer) reduceUserMessage(state domain.SessionState, event domain.Event) (ReduceResult, error) {
 	var payload UserMessagePayload
 	if err := json.Unmarshal(event.Payload, &payload); err != nil {
 		return ReduceResult{}, fmt.Errorf("decode user message payload: %w", err)
@@ -377,7 +391,19 @@ func reduceUserMessage(state domain.SessionState, event domain.Event) (ReduceRes
 		CreatedAt: event.CreatedAt,
 	})
 
-	actionPayload, err := json.Marshal(DispatchLLMCallPayload{Input: payload.Text, Messages: BuildLLMMessages(state)})
+	// Select skills once per run from the in-memory snapshot (pure, no I/O) and
+	// record them on the state so follow-up LLM calls reuse the same set.
+	refs, skillEvents, err := r.selectSkills(event, payload.Text)
+	if err != nil {
+		return ReduceResult{}, err
+	}
+	state.SelectedSkills = refs
+
+	actionPayload, err := json.Marshal(DispatchLLMCallPayload{
+		Input:          payload.Text,
+		Messages:       BuildLLMMessages(state),
+		SelectedSkills: refs,
+	})
 	if err != nil {
 		return ReduceResult{}, fmt.Errorf("marshal llm action payload: %w", err)
 	}
@@ -397,27 +423,118 @@ func reduceUserMessage(state domain.SessionState, event domain.Event) (ReduceRes
 		return ReduceResult{}, fmt.Errorf("marshal run status changed payload: %w", err)
 	}
 
+	events := []domain.Event{
+		{
+			EventID:   event.RunID + ":started",
+			SessionID: event.SessionID,
+			RunID:     event.RunID,
+			Type:      domain.EventRunStarted,
+			CreatedAt: event.CreatedAt,
+			Payload:   json.RawMessage(`{}`),
+		},
+		{
+			EventID:   event.RunID + ":status:waiting_llm",
+			SessionID: event.SessionID,
+			RunID:     event.RunID,
+			Type:      domain.EventRunStatusChanged,
+			CreatedAt: event.CreatedAt,
+			Payload:   statusPayload,
+		},
+	}
+	// Skill events follow RunStatusChanged so the stream reads
+	// ...→RunStatusChanged→SkillSelected→SkillLoaded→SkillApplied→LLMCallStarted.
+	events = append(events, skillEvents...)
+
 	return ReduceResult{
 		NextState: state,
-		Events: []domain.Event{
-			{
-				EventID:   event.RunID + ":started",
-				SessionID: event.SessionID,
-				RunID:     event.RunID,
-				Type:      domain.EventRunStarted,
-				CreatedAt: event.CreatedAt,
-				Payload:   json.RawMessage(`{}`),
-			},
-			{
-				EventID:   event.RunID + ":status:waiting_llm",
-				SessionID: event.SessionID,
-				RunID:     event.RunID,
-				Type:      domain.EventRunStatusChanged,
-				CreatedAt: event.CreatedAt,
-				Payload:   statusPayload,
-			},
-		},
-		Actions: []domain.Action{action},
+		Events:    events,
+		Actions:   []domain.Action{action},
+	}, nil
+}
+
+// selectSkills runs pure in-memory skill selection for a newly started run. It
+// returns the chosen skill refs (for the run snapshot and the dispatch payload)
+// plus the lifecycle events to emit: one SkillSelected and one SkillLoaded per
+// skill followed by a single SkillApplied summary, or a single SkillSkipped when
+// nothing matched. With skills disabled it is a no-op. It performs no I/O: the
+// snapshot is an immutable copy taken from the in-memory index.
+func (r Reducer) selectSkills(event domain.Event, text string) ([]domain.SkillRef, []domain.Event, error) {
+	if !r.cfg.SkillsEnabled || r.cfg.SkillIndex == nil {
+		return nil, nil, nil
+	}
+
+	selected := skill.Select(r.cfg.SkillIndex.Snapshot(), skill.SelectionInput{Text: text}, r.cfg.SkillSelect)
+	if len(selected) == 0 {
+		skipped, err := skillEvent(event, domain.EventSkillSkipped, ":skill_skipped", skill.SkillEventPayload{})
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, []domain.Event{skipped}, nil
+	}
+
+	refs := make([]domain.SkillRef, 0, len(selected))
+	ids := make([]string, 0, len(selected))
+	events := make([]domain.Event, 0, len(selected)*2+1)
+	totalChars := 0
+
+	// Selection phase: record why each skill was chosen (score + reason).
+	for _, sel := range selected {
+		evt, err := skillEvent(event, domain.EventSkillSelected, ":skill_selected:"+sel.Ref.ID, skill.SkillEventPayload{
+			SkillID:      sel.Ref.ID,
+			SkillName:    sel.Ref.Name,
+			SkillVersion: sel.Ref.Version,
+			Score:        sel.Score,
+			Reason:       sel.Reason,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		events = append(events, evt)
+	}
+	// Load phase: record what content (hash + chars) was made available.
+	for _, sel := range selected {
+		evt, err := skillEvent(event, domain.EventSkillLoaded, ":skill_loaded:"+sel.Ref.ID, skill.SkillEventPayload{
+			SkillID:      sel.Ref.ID,
+			SkillName:    sel.Ref.Name,
+			SkillVersion: sel.Ref.Version,
+			ContentHash:  sel.Ref.ContentHash,
+			Chars:        sel.Ref.Chars,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		events = append(events, evt)
+		refs = append(refs, sel.Ref)
+		ids = append(ids, sel.Ref.ID)
+		totalChars += sel.Ref.Chars
+	}
+	applied, err := skillEvent(event, domain.EventSkillApplied, ":skill_applied", skill.SkillAppliedPayload{
+		SkillIDs:   ids,
+		Count:      len(ids),
+		TotalChars: totalChars,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	events = append(events, applied)
+
+	return refs, events, nil
+}
+
+// skillEvent builds a derived skill lifecycle event with a deterministic ID. The
+// payload is any of the skill event payload shapes; only metadata is carried.
+func skillEvent(event domain.Event, typ domain.EventType, suffix string, payload any) (domain.Event, error) {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return domain.Event{}, fmt.Errorf("marshal %s payload: %w", typ, err)
+	}
+	return domain.Event{
+		EventID:   event.RunID + suffix,
+		SessionID: event.SessionID,
+		RunID:     event.RunID,
+		Type:      typ,
+		CreatedAt: event.CreatedAt,
+		Payload:   encoded,
 	}, nil
 }
 
@@ -512,7 +629,7 @@ func (r Reducer) reduceLLMToolCall(state domain.SessionState, event domain.Event
 	return ReduceResult{NextState: state, Actions: []domain.Action{action}}, nil
 }
 
-func reduceToolCallSucceeded(state domain.SessionState, event domain.Event) (ReduceResult, error) {
+func (r Reducer) reduceToolCallSucceeded(state domain.SessionState, event domain.Event) (ReduceResult, error) {
 	var payload ToolCallEventPayload
 	if err := json.Unmarshal(event.Payload, &payload); err != nil {
 		return ReduceResult{}, fmt.Errorf("decode tool result payload: %w", err)
@@ -533,7 +650,13 @@ func reduceToolCallSucceeded(state domain.SessionState, event domain.Event) (Red
 		ToolName:   payload.Name,
 	})
 
-	actionPayload, err := json.Marshal(DispatchLLMCallPayload{Input: resultText, Messages: BuildLLMMessages(state)})
+	// Reuse the skills selected at run start; do not re-select or re-emit so the
+	// prompt stays stable across tool iterations within a run.
+	actionPayload, err := json.Marshal(DispatchLLMCallPayload{
+		Input:          resultText,
+		Messages:       BuildLLMMessages(state),
+		SelectedSkills: state.SelectedSkills,
+	})
 	if err != nil {
 		return ReduceResult{}, fmt.Errorf("marshal follow-up llm action payload: %w", err)
 	}

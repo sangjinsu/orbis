@@ -96,6 +96,12 @@ func (l *SessionLane) saveRunState(ctx context.Context, state domain.SessionStat
 	}
 	run.Status = state.RunStatus
 	run.UpdatedAt = event.CreatedAt
+	// Snapshot the run's selected skills once: record them the first time the run
+	// has any, then leave them so the run history reflects what was applied even
+	// after a later index reload.
+	if len(run.SelectedSkills) == 0 && len(state.SelectedSkills) > 0 {
+		run.SelectedSkills = state.SelectedSkills
+	}
 	if err := l.store.SaveRun(ctx, run); err != nil {
 		return fmt.Errorf("save run: %w", err)
 	}

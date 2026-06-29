@@ -7,7 +7,36 @@ import (
 	"time"
 
 	"github.com/sangjinsu/orbis/internal/domain"
+	"github.com/sangjinsu/orbis/internal/skill"
 )
+
+// fakeSkillIndex is an in-memory skill.Index for reducer and lane tests.
+type fakeSkillIndex struct {
+	entries []skill.Entry
+}
+
+func (f fakeSkillIndex) Snapshot() []skill.Entry { return f.entries }
+
+// wsSkillIndex returns an index with a single websocket-triggered skill used to
+// exercise selection deterministically.
+func wsSkillIndex() fakeSkillIndex {
+	return fakeSkillIndex{entries: []skill.Entry{
+		{
+			Metadata: skill.Metadata{
+				ID:       "ws-test",
+				Name:     "ws",
+				Title:    "WebSocket Runtime Test",
+				Triggers: []string{"websocket"},
+				Version:  "1",
+				Priority: 100,
+				Status:   "active",
+			},
+			Body:        "WebSocket runtime test body",
+			ContentHash: "hash-ws",
+			Chars:       27,
+		},
+	}}
+}
 
 func TestReducerUserMessageDispatchesLLMCall(t *testing.T) {
 	reducer := Reducer{}
@@ -481,5 +510,183 @@ func TestReducerTimerFiredFailsRunAndEmitsRunFailed(t *testing.T) {
 	}
 	if result.Events[0].Type != domain.EventRunFailed {
 		t.Fatalf("derived event = %q, want %q", result.Events[0].Type, domain.EventRunFailed)
+	}
+}
+
+func TestReducerUserMessageSelectsSkillsAndEmitsLifecycleEvents(t *testing.T) {
+	reducer := NewReducer(ReducerConfig{
+		SkillsEnabled: true,
+		SkillIndex:    wsSkillIndex(),
+		SkillSelect:   skill.SelectConfig{MaxSelected: 3, MaxChars: 12000},
+	})
+	now := time.Unix(1700000000, 0).UTC()
+	state := domain.SessionState{SessionID: "session_1", RunStatus: domain.RunIdle, CreatedAt: now, UpdatedAt: now}
+	event := domain.Event{
+		EventID:   "evt_1",
+		SessionID: "session_1",
+		RunID:     "run_1",
+		Type:      domain.EventUserMessageReceived,
+		Seq:       1,
+		CreatedAt: now,
+		Payload:   json.RawMessage(`{"text":"how do I run a websocket runtime test?"}`),
+	}
+
+	result, err := reducer.Apply(context.Background(), state, event)
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	if len(result.NextState.SelectedSkills) != 1 || result.NextState.SelectedSkills[0].ID != "ws-test" {
+		t.Fatalf("SelectedSkills = %#v, want one ws-test", result.NextState.SelectedSkills)
+	}
+
+	wantTypes := []domain.EventType{
+		domain.EventRunStarted,
+		domain.EventRunStatusChanged,
+		domain.EventSkillSelected,
+		domain.EventSkillLoaded,
+		domain.EventSkillApplied,
+	}
+	if len(result.Events) != len(wantTypes) {
+		t.Fatalf("events len = %d, want %d (%#v)", len(result.Events), len(wantTypes), result.Events)
+	}
+	for i, want := range wantTypes {
+		if result.Events[i].Type != want {
+			t.Fatalf("events[%d] = %q, want %q", i, result.Events[i].Type, want)
+		}
+	}
+
+	var selected skill.SkillEventPayload
+	if err := json.Unmarshal(result.Events[2].Payload, &selected); err != nil {
+		t.Fatalf("unmarshal SkillSelected payload: %v", err)
+	}
+	if selected.SkillID != "ws-test" || selected.Score <= 0 || selected.Reason == "" {
+		t.Fatalf("SkillSelected payload = %#v, want ws-test with score and reason", selected)
+	}
+
+	var loaded skill.SkillEventPayload
+	if err := json.Unmarshal(result.Events[3].Payload, &loaded); err != nil {
+		t.Fatalf("unmarshal SkillLoaded payload: %v", err)
+	}
+	if loaded.ContentHash != "hash-ws" || loaded.Chars != 27 {
+		t.Fatalf("SkillLoaded payload = %#v, want hash-ws/27", loaded)
+	}
+
+	var applied skill.SkillAppliedPayload
+	if err := json.Unmarshal(result.Events[4].Payload, &applied); err != nil {
+		t.Fatalf("unmarshal SkillApplied payload: %v", err)
+	}
+	if applied.Count != 1 || applied.TotalChars != 27 || len(applied.SkillIDs) != 1 || applied.SkillIDs[0] != "ws-test" {
+		t.Fatalf("SkillApplied payload = %#v, want count 1 ws-test 27 chars", applied)
+	}
+
+	var payload DispatchLLMCallPayload
+	if err := json.Unmarshal(result.Actions[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshal action payload: %v", err)
+	}
+	if len(payload.SelectedSkills) != 1 || payload.SelectedSkills[0].ID != "ws-test" {
+		t.Fatalf("payload SelectedSkills = %#v, want one ws-test", payload.SelectedSkills)
+	}
+}
+
+func TestReducerUserMessageEmitsSkillSkippedWhenNoMatch(t *testing.T) {
+	reducer := NewReducer(ReducerConfig{
+		SkillsEnabled: true,
+		SkillIndex:    wsSkillIndex(),
+		SkillSelect:   skill.SelectConfig{MaxSelected: 3, MaxChars: 12000},
+	})
+	now := time.Unix(1700000000, 0).UTC()
+	state := domain.SessionState{SessionID: "session_1", RunStatus: domain.RunIdle, CreatedAt: now, UpdatedAt: now}
+	event := domain.Event{
+		EventID:   "evt_1",
+		SessionID: "session_1",
+		RunID:     "run_1",
+		Type:      domain.EventUserMessageReceived,
+		Seq:       1,
+		CreatedAt: now,
+		Payload:   json.RawMessage(`{"text":"tell me a story about a cat"}`),
+	}
+
+	result, err := reducer.Apply(context.Background(), state, event)
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if len(result.NextState.SelectedSkills) != 0 {
+		t.Fatalf("SelectedSkills = %#v, want none", result.NextState.SelectedSkills)
+	}
+	if len(result.Events) != 3 || result.Events[2].Type != domain.EventSkillSkipped {
+		t.Fatalf("events = %#v, want RunStarted, RunStatusChanged, SkillSkipped", result.Events)
+	}
+}
+
+func TestReducerUserMessageSkipsSelectionWhenDisabled(t *testing.T) {
+	// Index present but SkillsEnabled false: selection is skipped, matching v0.2.
+	reducer := NewReducer(ReducerConfig{
+		SkillsEnabled: false,
+		SkillIndex:    wsSkillIndex(),
+	})
+	now := time.Unix(1700000000, 0).UTC()
+	state := domain.SessionState{SessionID: "session_1", RunStatus: domain.RunIdle, CreatedAt: now, UpdatedAt: now}
+	event := domain.Event{
+		EventID:   "evt_1",
+		SessionID: "session_1",
+		RunID:     "run_1",
+		Type:      domain.EventUserMessageReceived,
+		Seq:       1,
+		CreatedAt: now,
+		Payload:   json.RawMessage(`{"text":"how do I run a websocket runtime test?"}`),
+	}
+
+	result, err := reducer.Apply(context.Background(), state, event)
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if len(result.NextState.SelectedSkills) != 0 {
+		t.Fatalf("SelectedSkills = %#v, want none when disabled", result.NextState.SelectedSkills)
+	}
+	if len(result.Events) != 2 {
+		t.Fatalf("events len = %d, want 2 (no skill events when disabled)", len(result.Events))
+	}
+}
+
+func TestReducerToolSuccessReusesSelectedSkillsWithoutReemitting(t *testing.T) {
+	reducer := NewReducer(ReducerConfig{
+		SkillsEnabled: true,
+		SkillIndex:    wsSkillIndex(),
+		SkillSelect:   skill.SelectConfig{MaxSelected: 3, MaxChars: 12000},
+	})
+	now := time.Unix(1700000000, 0).UTC()
+	state := domain.SessionState{
+		SessionID:      "session_1",
+		CurrentRunID:   "run_1",
+		RunStatus:      domain.RunWaitingTool,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		SelectedSkills: []domain.SkillRef{{ID: "ws-test", Name: "ws", Version: "1"}},
+	}
+	event := domain.Event{
+		EventID:   "evt_tool_success",
+		SessionID: "session_1",
+		RunID:     "run_1",
+		Type:      domain.EventToolCallSucceeded,
+		Seq:       3,
+		CreatedAt: now,
+		Payload:   json.RawMessage(`{"tool_call_id":"call_1","name":"echo","result":{"text":"hello"}}`),
+	}
+
+	result, err := reducer.Apply(context.Background(), state, event)
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	// No skill events are re-emitted on a follow-up LLM call.
+	if len(result.Events) != 0 {
+		t.Fatalf("events len = %d, want 0 (no skill re-emit on tool success)", len(result.Events))
+	}
+	var payload DispatchLLMCallPayload
+	if err := json.Unmarshal(result.Actions[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshal action payload: %v", err)
+	}
+	if len(payload.SelectedSkills) != 1 || payload.SelectedSkills[0].ID != "ws-test" {
+		t.Fatalf("payload SelectedSkills = %#v, want reused ws-test", payload.SelectedSkills)
 	}
 }

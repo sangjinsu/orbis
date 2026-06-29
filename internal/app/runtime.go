@@ -11,6 +11,7 @@ import (
 	"github.com/sangjinsu/orbis/internal/domain"
 	"github.com/sangjinsu/orbis/internal/protocol"
 	orbisruntime "github.com/sangjinsu/orbis/internal/runtime"
+	"github.com/sangjinsu/orbis/internal/skill"
 	"github.com/sangjinsu/orbis/internal/store"
 	"github.com/sangjinsu/orbis/internal/tool"
 	"github.com/sangjinsu/orbis/internal/worker"
@@ -22,6 +23,7 @@ type RuntimeServiceConfig struct {
 	LLMProvider   worker.LLMProvider
 	ToolRunner    orbisruntime.ToolRunner
 	ToolSchemas   []tool.ToolSchema
+	SkillBodies   skill.Bodies
 	ReducerConfig orbisruntime.ReducerConfig
 	RunTimeout    time.Duration
 	Now           func() time.Time
@@ -100,6 +102,7 @@ func NewRuntimeService(cfg RuntimeServiceConfig) *RuntimeService {
 		LLMProvider: cfg.LLMProvider,
 		ToolRunner:  cfg.ToolRunner,
 		ToolSchemas: cfg.ToolSchemas,
+		SkillBodies: cfg.SkillBodies,
 		EventSink:   service,
 		Now:         now,
 	})

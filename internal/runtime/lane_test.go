@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sangjinsu/orbis/internal/domain"
+	"github.com/sangjinsu/orbis/internal/skill"
 	"github.com/sangjinsu/orbis/internal/store"
 )
 
@@ -63,6 +64,40 @@ func TestSessionLaneAppliesEventsInOrderAndDispatchesActions(t *testing.T) {
 	}
 	if actions[0].Type != domain.ActionDispatchLLMCall || actions[1].Type != domain.ActionEmitFinalAnswer {
 		t.Fatalf("action types = %q, %q", actions[0].Type, actions[1].Type)
+	}
+}
+
+func TestSessionLaneSnapshotsSelectedSkillsOntoRun(t *testing.T) {
+	ctx := context.Background()
+	store := &recordingStore{}
+	lane := NewSessionLane(SessionLaneConfig{
+		SessionID: "session_1",
+		Reducer: NewReducer(ReducerConfig{
+			SkillsEnabled: true,
+			SkillIndex:    wsSkillIndex(),
+			SkillSelect:   skill.SelectConfig{MaxSelected: 3, MaxChars: 12000},
+		}),
+		Store: store,
+	})
+	now := time.Unix(1700000000, 0).UTC()
+	event := domain.Event{
+		EventID:   "evt_1",
+		SessionID: "session_1",
+		RunID:     "run_1",
+		Type:      domain.EventUserMessageReceived,
+		Seq:       1,
+		CreatedAt: now,
+		Payload:   json.RawMessage(`{"text":"how do I run a websocket runtime test?"}`),
+	}
+
+	if _, err := lane.Handle(ctx, event); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if len(store.run.SelectedSkills) != 1 || store.run.SelectedSkills[0].ID != "ws-test" {
+		t.Fatalf("run.SelectedSkills = %#v, want one ws-test snapshot", store.run.SelectedSkills)
+	}
+	if len(store.session.SelectedSkills) != 1 || store.session.SelectedSkills[0].ID != "ws-test" {
+		t.Fatalf("session.SelectedSkills = %#v, want one ws-test", store.session.SelectedSkills)
 	}
 }
 
