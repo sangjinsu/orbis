@@ -20,16 +20,34 @@ type Broker interface {
 	Subscribe(ctx context.Context, sessionID string) (<-chan protocol.RuntimeEvent, func())
 }
 
+// Skills exposes the skill catalog for read-only HTTP inspection and reload. It
+// returns wire DTOs so the gateway stays decoupled from the internal store.
+type Skills interface {
+	ListSkills() protocol.SkillListPayload
+	GetSkill(id string) (protocol.SkillDetailPayload, bool)
+	ReloadSkills() error
+}
+
 type HandlerOption func(*handlerConfig)
 
 type handlerConfig struct {
 	broker      Broker
+	skills      Skills
 	readTimeout time.Duration
 }
 
 func WithBroker(broker Broker) HandlerOption {
 	return func(cfg *handlerConfig) {
 		cfg.broker = broker
+	}
+}
+
+// WithSkills registers the read-only HTTP skill endpoints (GET /skills,
+// GET /skills/{skillID}, POST /skills/reload). Omitting it leaves those routes
+// unregistered so they 404.
+func WithSkills(skills Skills) HandlerOption {
+	return func(cfg *handlerConfig) {
+		cfg.skills = skills
 	}
 }
 
@@ -58,7 +76,33 @@ func NewHTTPHandler(runtime Runtime, opts ...HandlerOption) http.Handler {
 	mux.HandleFunc("GET /ws", func(w http.ResponseWriter, r *http.Request) {
 		handleWebSocket(w, r, runtime, cfg.broker, cfg.readTimeout)
 	})
+	if cfg.skills != nil {
+		mux.HandleFunc("GET /skills", func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusOK, cfg.skills.ListSkills())
+		})
+		mux.HandleFunc("GET /skills/{skillID}", func(w http.ResponseWriter, r *http.Request) {
+			detail, ok := cfg.skills.GetSkill(r.PathValue("skillID"))
+			if !ok {
+				http.Error(w, "skill not found", http.StatusNotFound)
+				return
+			}
+			writeJSON(w, http.StatusOK, detail)
+		})
+		mux.HandleFunc("POST /skills/reload", func(w http.ResponseWriter, r *http.Request) {
+			if err := cfg.skills.ReloadSkills(); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, http.StatusOK, protocol.SkillReloadPayload{Count: len(cfg.skills.ListSkills().Skills)})
+		})
+	}
 	return mux
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
 }
 
 func handleWebSocket(w http.ResponseWriter, r *http.Request, runtime Runtime, broker Broker, readTimeout time.Duration) {

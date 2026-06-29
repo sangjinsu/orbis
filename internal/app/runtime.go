@@ -24,6 +24,7 @@ type RuntimeServiceConfig struct {
 	ToolRunner    orbisruntime.ToolRunner
 	ToolSchemas   []tool.ToolSchema
 	SkillBodies   skill.Bodies
+	SkillCatalog  SkillCatalog
 	ReducerConfig orbisruntime.ReducerConfig
 	RunTimeout    time.Duration
 	Now           func() time.Time
@@ -44,6 +45,7 @@ type RuntimeService struct {
 	dispatcher  *orbisruntime.Dispatcher
 	llmProvider worker.LLMProvider
 	reducerCfg  orbisruntime.ReducerConfig
+	skills      SkillCatalog
 
 	runMu      sync.Mutex
 	activeRuns map[string]*runExecution
@@ -107,6 +109,7 @@ func NewRuntimeService(cfg RuntimeServiceConfig) *RuntimeService {
 		eventQueues: map[string]chan domain.Event{},
 		llmProvider: cfg.LLMProvider,
 		reducerCfg:  cfg.ReducerConfig,
+		skills:      cfg.SkillCatalog,
 		activeRuns:  map[string]*runExecution{},
 		runTimeout:  cfg.RunTimeout,
 		quit:        make(chan struct{}),
@@ -182,6 +185,12 @@ func (s *RuntimeService) HandleClientRequest(ctx context.Context, req protocol.C
 		return s.handleRunCancel(ctx, req)
 	case "events.list":
 		return s.handleEventsList(ctx, req)
+	case "skill.list":
+		return s.handleSkillList(ctx, req)
+	case "skill.get":
+		return s.handleSkillGet(ctx, req)
+	case "skill.reload":
+		return s.handleSkillReload(ctx, req)
 	default:
 		return nil, fmt.Errorf("unsupported method %q", req.Method)
 	}
