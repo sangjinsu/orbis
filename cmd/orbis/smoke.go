@@ -23,6 +23,9 @@ type wsSmokeConfig struct {
 	// RequireToolCall fails the smoke if the run completes without a successful
 	// tool call, proving the real LLM drove a tool through the runtime.
 	RequireToolCall bool
+	// RequireSkill fails the smoke if the run completes without applying skills,
+	// proving skill selection and context injection ran through the runtime.
+	RequireSkill bool
 }
 
 func runWSSmoke(ctx context.Context, cfg wsSmokeConfig, out io.Writer) error {
@@ -61,6 +64,7 @@ func runWSSmoke(ctx context.Context, cfg wsSmokeConfig, out io.Writer) error {
 
 	var firstFailureEvent string
 	var sawToolSucceeded bool
+	var sawSkillApplied bool
 	for {
 		var raw json.RawMessage
 		if err := wsjson.Read(ctx, conn, &raw); err != nil {
@@ -89,9 +93,14 @@ func runWSSmoke(ctx context.Context, cfg wsSmokeConfig, out io.Writer) error {
 			switch header.Event {
 			case string(domain.EventToolCallSucceeded):
 				sawToolSucceeded = true
+			case string(domain.EventSkillApplied):
+				sawSkillApplied = true
 			case string(domain.EventRunCompleted):
 				if cfg.RequireToolCall && !sawToolSucceeded {
 					return fmt.Errorf("run completed without a successful tool call")
+				}
+				if cfg.RequireSkill && !sawSkillApplied {
+					return fmt.Errorf("run completed without applying skills")
 				}
 				return nil
 			case string(domain.EventRunFailed):
@@ -143,5 +152,15 @@ func toolSmokeConfigFromEnv(cfg config.Config) wsSmokeConfig {
 		Text:            "Use the math.add tool to add 1 and 2, then reply with the numeric result.",
 		Timeout:         90 * time.Second,
 		RequireToolCall: true,
+	}
+}
+
+func skillSmokeConfigFromEnv(cfg config.Config) wsSmokeConfig {
+	return wsSmokeConfig{
+		URL:          wsURLFromAddr(cfg.Addr),
+		SessionID:    "session_smoke_skill",
+		Text:         "WebSocket으로 Orbis 런타임 테스트 방법 알려줘",
+		Timeout:      90 * time.Second,
+		RequireSkill: true,
 	}
 }

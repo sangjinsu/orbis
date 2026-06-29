@@ -23,6 +23,10 @@ type RunState struct {
 	Status    RunStatus `json:"status"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+	// SelectedSkills is the per-run snapshot of skills applied to the run's LLM
+	// context. Written once when the run first selects skills and then left
+	// untouched, so it records what was used even if the index later reloads.
+	SelectedSkills []SkillRef `json:"selected_skills,omitempty"`
 }
 
 // IsTerminalRunStatus reports whether a run has reached a final state and can no

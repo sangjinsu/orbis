@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sangjinsu/orbis/internal/domain"
+	"github.com/sangjinsu/orbis/internal/skill"
 	"github.com/sangjinsu/orbis/internal/tool"
 	"github.com/sangjinsu/orbis/internal/worker"
 )
@@ -27,6 +28,10 @@ type DispatcherConfig struct {
 	LLMProvider worker.LLMProvider
 	ToolRunner  ToolRunner
 	ToolSchemas []tool.ToolSchema
+	// SkillBodies resolves selected skill bodies from the in-memory store so the
+	// dispatcher can render them into the LLM request Instructions. Optional; nil
+	// disables skill context injection.
+	SkillBodies skill.Bodies
 	EventSink   EventSink
 	Now         func() time.Time
 }
@@ -35,6 +40,7 @@ type Dispatcher struct {
 	llmProvider worker.LLMProvider
 	toolRunner  ToolRunner
 	toolSchemas []tool.ToolSchema
+	skillBodies skill.Bodies
 	eventSink   EventSink
 	now         func() time.Time
 }
@@ -48,6 +54,7 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 		llmProvider: cfg.LLMProvider,
 		toolRunner:  cfg.ToolRunner,
 		toolSchemas: cfg.ToolSchemas,
+		skillBodies: cfg.SkillBodies,
 		eventSink:   cfg.EventSink,
 		now:         now,
 	}
@@ -95,9 +102,10 @@ func (d *Dispatcher) dispatchLLMCall(ctx context.Context, action domain.Action) 
 	}
 
 	stream, err := d.llmProvider.Stream(ctx, worker.LLMRequest{
-		Input:    payload.Input,
-		Messages: payload.Messages,
-		Tools:    d.toolSchemas,
+		Input:        payload.Input,
+		Instructions: d.skillInstructions(payload.SelectedSkills),
+		Messages:     payload.Messages,
+		Tools:        d.toolSchemas,
 	})
 	if err != nil {
 		return d.dispatchLLMFailure(ctx, action, err)
@@ -166,6 +174,23 @@ func (d *Dispatcher) dispatchLLMCall(ctx context.Context, action domain.Action) 
 		CreatedAt: d.now(),
 		Payload:   resultPayload,
 	})
+}
+
+// skillInstructions resolves the selected skill bodies from the in-memory store
+// and renders them into the <orbis_skills> instructions block. Bodies that are
+// no longer present (e.g. removed by a reload) are skipped; with nothing to
+// render it returns "" so the request Instructions stays unset. No disk I/O.
+func (d *Dispatcher) skillInstructions(refs []domain.SkillRef) string {
+	if d.skillBodies == nil || len(refs) == 0 {
+		return ""
+	}
+	bodies := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if body, ok := d.skillBodies.Body(ref.ID); ok {
+			bodies = append(bodies, body)
+		}
+	}
+	return skill.BuildContext(bodies)
 }
 
 func (d *Dispatcher) dispatchToolCall(ctx context.Context, action domain.Action) error {

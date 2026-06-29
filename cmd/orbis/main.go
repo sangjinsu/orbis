@@ -25,7 +25,11 @@ func main() {
 			slog.Error("load config", "error", err)
 			os.Exit(1)
 		}
-		server := app.NewHTTPServer(cfg)
+		server, err := app.NewHTTPServer(cfg)
+		if err != nil {
+			slog.Error("build server", "error", err)
+			os.Exit(1)
+		}
 		slog.Info("orbis server starting", "addr", cfg.Addr, "data_dir", cfg.DataDir, "llm_provider", cfg.LLMProvider, "llm_model", cfg.LLMModel)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server stopped", "error", err)
@@ -42,8 +46,13 @@ func main() {
 			os.Exit(1)
 		}
 		smokeCfg := smokeConfigFromEnv(cfg)
-		if len(os.Args) >= 4 && os.Args[3] == "tool" {
-			smokeCfg = toolSmokeConfigFromEnv(cfg)
+		if len(os.Args) >= 4 {
+			switch os.Args[3] {
+			case "tool":
+				smokeCfg = toolSmokeConfigFromEnv(cfg)
+			case "skill":
+				smokeCfg = skillSmokeConfigFromEnv(cfg)
+			}
 		}
 		if err := runWSSmoke(context.Background(), smokeCfg, os.Stdout); err != nil {
 			slog.Error("websocket smoke failed", "error", err)
@@ -56,5 +65,5 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, "usage: orbis serve | orbis ws smoke [tool]")
+	fmt.Fprintln(os.Stderr, "usage: orbis serve | orbis ws smoke [tool|skill]")
 }
