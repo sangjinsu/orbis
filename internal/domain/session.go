@@ -29,4 +29,8 @@ type SessionState struct {
 	// follow-up LLM calls (after tool results) reuse the same set without
 	// re-selecting, keeping the prompt stable across a run.
 	SelectedSkills []SkillRef `json:"selected_skills,omitempty"`
+	// ToolDenialContinuations counts how many times the current run has continued
+	// after a tool-policy rejection (feeding the denial back to the LLM). It is the
+	// loop guard that bounds denial continuations per run.
+	ToolDenialContinuations int `json:"tool_denial_continuations,omitempty"`
 }

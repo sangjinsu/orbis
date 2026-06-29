@@ -29,6 +29,11 @@ type Config struct {
 	ToolRetryMaxDelay      time.Duration
 	ToolRetryBackoffFactor float64
 
+	// ToolDenialContinuationMax (v1.5) bounds how many times a run continues after
+	// a tool-policy rejection by feeding the denial back to the LLM. 0 fails the
+	// run on the first rejection (v0.2 behavior).
+	ToolDenialContinuationMax int
+
 	// WSReadTimeout bounds how long a WebSocket read may block. 0 disables it,
 	// which is the default because subscriber connections idle between events.
 	WSReadTimeout time.Duration
@@ -92,6 +97,10 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	toolDenialContinuationMax, err := intOrDefault(values, "ORBIS_TOOL_DENIAL_CONTINUATION_MAX", 2)
+	if err != nil {
+		return Config{}, err
+	}
 	wsReadTimeout, err := durationOrDefault(values, "ORBIS_WS_READ_TIMEOUT", 0)
 	if err != nil {
 		return Config{}, err
@@ -130,6 +139,8 @@ func Load(path string) (Config, error) {
 		ToolRetryInitialDelay:  toolRetryInitialDelay,
 		ToolRetryMaxDelay:      toolRetryMaxDelay,
 		ToolRetryBackoffFactor: toolRetryBackoffFactor,
+
+		ToolDenialContinuationMax: toolDenialContinuationMax,
 
 		WSReadTimeout: wsReadTimeout,
 
