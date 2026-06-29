@@ -33,6 +33,7 @@ func NewHTTPServer(cfg config.Config) (*http.Server, error) {
 	// reducer skips selection, preserving v0.2 behavior.
 	var skillIndex skill.Index
 	var skillBodies skill.Bodies
+	var skillCatalog SkillCatalog
 	if cfg.SkillsEnabled {
 		skillStore, err := skill.NewStore(cfg.SkillsDir)
 		if err != nil {
@@ -40,6 +41,7 @@ func NewHTTPServer(cfg config.Config) (*http.Server, error) {
 		}
 		skillIndex = skillStore
 		skillBodies = skillStore
+		skillCatalog = skillStore
 	}
 
 	registry := tool.NewRegistry()
@@ -65,12 +67,13 @@ func NewHTTPServer(cfg config.Config) (*http.Server, error) {
 	})
 
 	runtime := NewRuntimeService(RuntimeServiceConfig{
-		Store:       fileStore,
-		Broker:      eventBroker,
-		LLMProvider: provider,
-		ToolRunner:  toolWorker,
-		ToolSchemas: registry.SchemasForLLM(enabledToolsets),
-		SkillBodies: skillBodies,
+		Store:        fileStore,
+		Broker:       eventBroker,
+		LLMProvider:  provider,
+		ToolRunner:   toolWorker,
+		ToolSchemas:  registry.SchemasForLLM(enabledToolsets),
+		SkillBodies:  skillBodies,
+		SkillCatalog: skillCatalog,
 		ReducerConfig: orbisruntime.ReducerConfig{
 			ToolTimeout:   cfg.ToolTimeoutDefault,
 			Retry:         retryPolicy,
@@ -83,12 +86,18 @@ func NewHTTPServer(cfg config.Config) (*http.Server, error) {
 		},
 		RunTimeout: cfg.RunTimeout,
 	})
+	handlerOpts := []gateway.HandlerOption{
+		gateway.WithBroker(eventBroker),
+		gateway.WithReadTimeout(cfg.WSReadTimeout),
+	}
+	// Expose the read-only skill HTTP endpoints only when skills are enabled, so
+	// /skills 404s in a skills-disabled deployment.
+	if cfg.SkillsEnabled {
+		handlerOpts = append(handlerOpts, gateway.WithSkills(runtime))
+	}
 	return &http.Server{
-		Addr: cfg.Addr,
-		Handler: gateway.NewHTTPHandler(runtime,
-			gateway.WithBroker(eventBroker),
-			gateway.WithReadTimeout(cfg.WSReadTimeout),
-		),
+		Addr:    cfg.Addr,
+		Handler: gateway.NewHTTPHandler(runtime, handlerOpts...),
 	}, nil
 }
 

@@ -14,6 +14,7 @@ import (
 	"github.com/sangjinsu/orbis/internal/domain"
 	"github.com/sangjinsu/orbis/internal/protocol"
 	orbisruntime "github.com/sangjinsu/orbis/internal/runtime"
+	"github.com/sangjinsu/orbis/internal/skill"
 	"github.com/sangjinsu/orbis/internal/store"
 	"github.com/sangjinsu/orbis/internal/tool"
 	"github.com/sangjinsu/orbis/internal/worker"
@@ -584,6 +585,125 @@ func TestRuntimeServiceTimesOutRunWithTimerFired(t *testing.T) {
 		return err == nil && run.Status == domain.RunFailed
 	})
 }
+
+func TestRuntimeServiceSkillListGetReload(t *testing.T) {
+	ctx := context.Background()
+	catalog := &fakeSkillCatalog{
+		metas: []skill.Metadata{{ID: "ws-test", Name: "ws", Title: "WebSocket Runtime Test", Version: "1"}},
+		entries: map[string]skill.Entry{
+			"ws-test": {
+				Metadata:    skill.Metadata{ID: "ws-test", Name: "ws", Version: "1"},
+				Body:        "WS BODY",
+				ContentHash: "hash-ws",
+				Chars:       7,
+			},
+		},
+	}
+	service := NewRuntimeService(RuntimeServiceConfig{
+		Store:        store.NewFileStore(t.TempDir()),
+		SkillCatalog: catalog,
+		Now:          func() time.Time { return time.Unix(1700000000, 0).UTC() },
+	})
+	defer service.Close()
+
+	listPayload, err := service.HandleClientRequest(ctx, protocol.ClientRequest{Type: "req", ID: "list_1", Method: "skill.list"})
+	if err != nil {
+		t.Fatalf("skill.list error = %v", err)
+	}
+	var list protocol.SkillListPayload
+	if err := json.Unmarshal(listPayload, &list); err != nil {
+		t.Fatalf("unmarshal skill.list: %v", err)
+	}
+	if len(list.Skills) != 1 || list.Skills[0].ID != "ws-test" {
+		t.Fatalf("skills = %#v, want one ws-test", list.Skills)
+	}
+
+	getPayload, err := service.HandleClientRequest(ctx, protocol.ClientRequest{Type: "req", ID: "get_1", Method: "skill.get", Params: json.RawMessage(`{"skill_id":"ws-test"}`)})
+	if err != nil {
+		t.Fatalf("skill.get error = %v", err)
+	}
+	var detail protocol.SkillDetailPayload
+	if err := json.Unmarshal(getPayload, &detail); err != nil {
+		t.Fatalf("unmarshal skill.get: %v", err)
+	}
+	if detail.ID != "ws-test" || detail.Body != "WS BODY" {
+		t.Fatalf("detail = %#v, want ws-test with body", detail)
+	}
+
+	if _, err := service.HandleClientRequest(ctx, protocol.ClientRequest{Type: "req", ID: "get_2", Method: "skill.get", Params: json.RawMessage(`{"skill_id":"missing"}`)}); err == nil {
+		t.Fatal("skill.get unknown error = nil, want not-found error")
+	}
+
+	if _, err := service.HandleClientRequest(ctx, protocol.ClientRequest{Type: "req", ID: "reload_1", Method: "skill.reload"}); err != nil {
+		t.Fatalf("skill.reload error = %v", err)
+	}
+	if catalog.reloadCount != 1 {
+		t.Fatalf("reloadCount = %d, want 1", catalog.reloadCount)
+	}
+}
+
+func TestRuntimeServicePublishesSkillEventsWhenEnabled(t *testing.T) {
+	ctx := context.Background()
+	fileStore := store.NewFileStore(t.TempDir())
+	eventBroker := broker.New()
+	events, unsubscribe := eventBroker.Subscribe(ctx, "session_1")
+	defer unsubscribe()
+	service := NewRuntimeService(RuntimeServiceConfig{
+		Store:  fileStore,
+		Broker: eventBroker,
+		LLMProvider: &fakeProvider{
+			response: worker.LLMResponse{Text: "ok", ProviderResponseID: "resp_1"},
+		},
+		ReducerConfig: orbisruntime.ReducerConfig{
+			SkillsEnabled: true,
+			SkillIndex: fakeSkillIndex{entries: []skill.Entry{{
+				Metadata: skill.Metadata{ID: "ws-test", Name: "ws", Triggers: []string{"websocket"}, Status: "active", Priority: 100},
+				Body:     "WS BODY", ContentHash: "hash-ws", Chars: 7,
+			}}},
+			SkillSelect: skill.SelectConfig{MaxSelected: 3, MaxChars: 12000},
+		},
+		Now: func() time.Time { return time.Unix(1700000000, 0).UTC() },
+	})
+	defer service.Close()
+
+	if _, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
+		Type:   "req",
+		ID:     "req_1",
+		Method: "session.message",
+		Params: json.RawMessage(`{"session_id":"session_1","text":"how do I run a websocket test?"}`),
+	}); err != nil {
+		t.Fatalf("session.message error = %v", err)
+	}
+
+	received := collectRuntimeEventsUntil(t, events, string(domain.EventRunCompleted))
+	if !containsEvent(received, string(domain.EventSkillApplied)) {
+		t.Fatalf("events = %#v, want SkillApplied", eventNames(received))
+	}
+}
+
+type fakeSkillCatalog struct {
+	metas       []skill.Metadata
+	entries     map[string]skill.Entry
+	reloadCount int
+}
+
+func (c *fakeSkillCatalog) List() []skill.Metadata { return c.metas }
+
+func (c *fakeSkillCatalog) Get(id string) (skill.Entry, bool) {
+	entry, ok := c.entries[id]
+	return entry, ok
+}
+
+func (c *fakeSkillCatalog) Reload() error {
+	c.reloadCount++
+	return nil
+}
+
+type fakeSkillIndex struct {
+	entries []skill.Entry
+}
+
+func (f fakeSkillIndex) Snapshot() []skill.Entry { return f.entries }
 
 type fakeProvider struct {
 	response      worker.LLMResponse
