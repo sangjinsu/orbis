@@ -68,12 +68,20 @@ func NewHTTPServer(cfg config.Config) (*http.Server, *RuntimeService, error) {
 		RetryPolicy:    retryPolicy,
 	})
 
+	// The enabled tool schemas are advertised to the LLM and their names also feed
+	// skill selection (skills whose related tools are enabled rank higher).
+	toolSchemas := registry.SchemasForLLM(enabledToolsets)
+	toolNames := make([]string, 0, len(toolSchemas))
+	for _, s := range toolSchemas {
+		toolNames = append(toolNames, s.Name)
+	}
+
 	runtime := NewRuntimeService(RuntimeServiceConfig{
 		Store:        fileStore,
 		Broker:       eventBroker,
 		LLMProvider:  provider,
 		ToolRunner:   toolWorker,
-		ToolSchemas:  registry.SchemasForLLM(enabledToolsets),
+		ToolSchemas:  toolSchemas,
 		SkillBodies:  skillBodies,
 		SkillCatalog: skillCatalog,
 		ReducerConfig: orbisruntime.ReducerConfig{
@@ -86,6 +94,7 @@ func NewHTTPServer(cfg config.Config) (*http.Server, *RuntimeService, error) {
 				MaxSelected: cfg.SkillsMaxSelected,
 				MaxChars:    cfg.SkillsMaxChars,
 			},
+			ToolNames: toolNames,
 		},
 		RunTimeout: cfg.RunTimeout,
 	})
