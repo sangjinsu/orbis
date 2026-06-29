@@ -139,6 +139,11 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req LLMRequest) (LLMRespo
 
 	text := decoded.outputText()
 	toolCall := decoded.functionCall()
+	if toolCall != nil {
+		// Map the sanitized wire name back to the registered tool name so the
+		// reducer dispatches the real tool.
+		toolCall.Name = originalToolName(req.Tools, toolCall.Name)
+	}
 	if text == "" && toolCall == nil {
 		return LLMResponse{}, errors.New("response contained no output_text or tool call")
 	}
@@ -184,7 +189,7 @@ func buildResponsesInput(messages []LLMMessage) []map[string]any {
 			items = append(items, map[string]any{
 				"type":      "function_call",
 				"call_id":   m.ToolCallID,
-				"name":      m.ToolName,
+				"name":      sanitizeToolName(m.ToolName),
 				"arguments": args,
 			})
 		default:
@@ -209,12 +214,42 @@ func buildResponsesTools(tools []tool.ToolSchema) []map[string]any {
 		}
 		defs = append(defs, map[string]any{
 			"type":        "function",
-			"name":        t.Name,
+			"name":        sanitizeToolName(t.Name),
 			"description": t.Description,
 			"parameters":  parameters,
 		})
 	}
 	return defs
+}
+
+// sanitizeToolName rewrites a tool name to satisfy the OpenAI Responses API
+// function-name pattern ^[a-zA-Z0-9_-]+$. Dotted registry names like "math.add"
+// become "math_add". Only the wire representation is sanitized; the runtime keeps
+// the original registry name and responses are mapped back via originalToolName.
+func sanitizeToolName(name string) string {
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	return b.String()
+}
+
+// originalToolName maps a sanitized function name from a provider response back to
+// the registered tool name, so the reducer dispatches by the real name. It falls
+// back to the provider-returned name when no advertised tool matches.
+func originalToolName(tools []tool.ToolSchema, sanitized string) string {
+	for _, t := range tools {
+		if sanitizeToolName(t.Name) == sanitized {
+			return t.Name
+		}
+	}
+	return sanitized
 }
 
 type openAIResponse struct {

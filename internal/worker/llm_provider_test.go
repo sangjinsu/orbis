@@ -81,7 +81,7 @@ func TestOpenAIProviderSendsToolsAndParsesFunctionCall(t *testing.T) {
 			"id": "resp_2",
 			"status": "completed",
 			"output": [
-				{"type": "function_call", "call_id": "call_abc", "name": "math.add", "arguments": "{\"a\":1,\"b\":2}"}
+				{"type": "function_call", "call_id": "call_abc", "name": "math_add", "arguments": "{\"a\":1,\"b\":2}"}
 			]
 		}`))
 	}))
@@ -108,8 +108,9 @@ func TestOpenAIProviderSendsToolsAndParsesFunctionCall(t *testing.T) {
 		t.Fatalf("tools = %v, want one tool definition", gotBody["tools"])
 	}
 	first, _ := tools[0].(map[string]any)
-	if first["type"] != "function" || first["name"] != "math.add" {
-		t.Fatalf("tool def = %v, want flattened function math.add", first)
+	// The dotted registry name is sanitized to the Responses API pattern on the wire.
+	if first["type"] != "function" || first["name"] != "math_add" {
+		t.Fatalf("tool def = %v, want flattened function math_add", first)
 	}
 	if _, hasParams := first["parameters"]; !hasParams {
 		t.Fatalf("tool def missing parameters: %v", first)
@@ -118,6 +119,7 @@ func TestOpenAIProviderSendsToolsAndParsesFunctionCall(t *testing.T) {
 	if resp.ToolCall == nil {
 		t.Fatal("resp.ToolCall = nil, want parsed function call")
 	}
+	// The sanitized wire name is mapped back to the registered tool name.
 	if resp.ToolCall.ToolCallID != "call_abc" || resp.ToolCall.Name != "math.add" {
 		t.Fatalf("tool call = %#v, want call_abc/math.add", resp.ToolCall)
 	}
@@ -162,8 +164,34 @@ func TestOpenAIProviderBuildsInputFromMessages(t *testing.T) {
 	if call["type"] != "function_call" || call["call_id"] != "call_abc" || call["arguments"] != `{"a":1,"b":2}` {
 		t.Fatalf("input[1] = %v, want function_call", call)
 	}
+	// The prior assistant function_call turn's name is sanitized on the wire too.
+	if call["name"] != "math_add" {
+		t.Fatalf("input[1] name = %v, want sanitized math_add", call["name"])
+	}
 	output, _ := input[2].(map[string]any)
 	if output["type"] != "function_call_output" || output["call_id"] != "call_abc" || output["output"] != `{"result":3}` {
 		t.Fatalf("input[2] = %v, want function_call_output", output)
+	}
+}
+
+func TestSanitizeAndOriginalToolName(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"echo", "echo"},
+		{"math.add", "math_add"},
+		{"mock.fail_once", "mock_fail_once"},
+		{"a.b.c", "a_b_c"},
+	} {
+		if got := sanitizeToolName(tc.in); got != tc.want {
+			t.Fatalf("sanitizeToolName(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+
+	tools := []tool.ToolSchema{{Name: "math.add"}, {Name: "time.now"}}
+	if got := originalToolName(tools, "math_add"); got != "math.add" {
+		t.Fatalf("originalToolName(math_add) = %q, want math.add", got)
+	}
+	// Unknown sanitized names fall back unchanged.
+	if got := originalToolName(tools, "unknown_x"); got != "unknown_x" {
+		t.Fatalf("originalToolName(unknown_x) = %q, want unknown_x", got)
 	}
 }
