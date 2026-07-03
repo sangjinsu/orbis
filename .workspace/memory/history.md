@@ -236,5 +236,56 @@ reached `RunCompleted` on `main`.
 - [x] Fix real-LLM tool naming — done in PR #27 (provider-boundary sanitize +
   `function_call` response round-trip); `orbis ws smoke skill`/`tool` verified on
   `main`.
-- [ ] Wire `RuntimeService.Close()` into HTTP server shutdown.
-- [ ] v1.5/v2: auto skill creation, learning loop, vector search, subagents, MCP.
+- [x] Wire `RuntimeService.Close()` into HTTP server shutdown — done in v1.5 (PR #29).
+- [ ] v2: auto skill creation, learning loop, vector search, subagents, MCP.
+
+## 2026-07-03: Orbis v1.5 Completed
+
+Status: completed (merged to `main`; unit/race verified)
+
+### Summary
+
+v1.5 layered three follow-ups onto the v1 skill system, each as its own PR:
+runtime graceful shutdown, agentic continuation after a tool-policy denial, and
+tool-aware skill selection.
+
+### Completed Scope
+
+- PR #29 — graceful shutdown: `NewHTTPServer` returns the `RuntimeService`, and
+  `orbis serve` handles SIGINT/SIGTERM by `server.Shutdown` then
+  `RuntimeService.Close()`, which drains in-flight session-queue and dispatch
+  goroutines. Verified live: SIGINT -> "orbis server shutting down" -> exit 0.
+- PR #30 — tool-denial continuation: a policy-rejected tool no longer fails the
+  run by default. The reducer records the denial as a tool result, emits
+  `ToolCallDenialContinued`, and dispatches a follow-up LLM call to replan, bounded
+  by a per-run `ToolDenialContinuations` counter
+  (`ORBIS_TOOL_DENIAL_CONTINUATION_MAX`, default 2; 0 restores v0.2 fail-on-denial).
+- PR #31 — tool-aware skill selection: `SelectionInput.ToolNames` (previously
+  reserved) now boosts skills whose `related_tools` are enabled for the run
+  (`scoreToolAvailable`, reason `tool_available`); the server passes the enabled
+  tool schema names into `ReducerConfig.ToolNames`.
+
+### Verification Evidence
+
+Fresh main-branch verification (`9d2f2d4`):
+
+```bash
+gofmt -l .
+go vet ./...
+go test ./...
+go test -race ./...    # 12/12 packages pass
+git diff --check
+```
+
+The graceful-shutdown path was verified against a real server (SIGINT -> exit 0).
+The denial-continuation and tool-aware-selection paths are deterministic and are
+verified by unit tests; their real-LLM smokes were skipped this session because
+`:8080` was held by an external process, and (for continuation) the default safe
+toolset cannot induce a policy denial via the real LLM. The normal skill/tool
+real-LLM paths were confirmed at v1 (#27, #29).
+
+### Follow-ups
+
+- [ ] Post-hoc real-LLM smoke of B/C once `:8080` is free.
+- [ ] v2: auto skill creation, learning loop, vector search, subagents, MCP,
+  `reload` auth separation.

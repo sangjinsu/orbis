@@ -133,5 +133,38 @@ record.
 
 - done: real-LLM tool naming fixed in PR #27 (provider-boundary sanitize +
   round-trip); v1 real-LLM acceptance passed on `main`.
-- wire `RuntimeService.Close()` into HTTP server shutdown.
-- v1.5/v2: auto skill creation, learning loop, vector search, subagents, MCP.
+- done: `RuntimeService.Close()` wired into server shutdown in v1.5 (PR #29).
+
+## v1.5: Runtime Shutdown, Denial Continuation, Tool-Aware Selection
+
+Three follow-ups on the v1 skill system, each a separate PR (all merged to `main`).
+
+- PR #29 — graceful shutdown: `NewHTTPServer` returns the `RuntimeService`;
+  `orbis serve` runs `server.Shutdown` then `RuntimeService.Close()` on
+  SIGINT/SIGTERM to drain background session-queue and dispatch goroutines.
+- PR #30 — tool-denial continuation: policy-rejected tools no longer fail the run
+  by default. The reducer records the denial as a tool result, emits
+  `ToolCallDenialContinued`, and dispatches a follow-up LLM call to replan, bounded
+  by a per-run `ToolDenialContinuations` counter
+  (`ORBIS_TOOL_DENIAL_CONTINUATION_MAX`, default 2; 0 = v0.2 fail-on-denial).
+- PR #31 — tool-aware skill selection: enabled tool names
+  (`ReducerConfig.ToolNames` -> `SelectionInput.ToolNames`) boost skills whose
+  `related_tools` are enabled (`scoreToolAvailable`, reason `tool_available`).
+
+## v1.5 Status
+
+Completed on 2026-07-03 (PRs #29·#30·#31 merged to `main`, `9d2f2d4`).
+
+Fresh main-branch verification: `go test ./...`, `go test -race ./...` (12/12),
+`gofmt -l .`, `git diff --check`. Graceful shutdown verified against a real server
+(SIGINT -> exit 0). The denial-continuation and tool-aware-selection real-LLM
+smokes were deferred (`:8080` externally held; the default safe toolset cannot
+induce a policy denial via the real LLM) and are covered by deterministic unit
+tests. See `history.md` for the v1.5 completion record.
+
+## Post-v1.5 Follow-ups
+
+- post-hoc real-LLM smoke of denial-continuation / tool-aware selection once
+  `:8080` is free.
+- v2: auto skill creation, learning loop, vector search, subagents, MCP,
+  `reload` auth separation.
