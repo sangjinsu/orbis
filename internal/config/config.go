@@ -45,6 +45,15 @@ type Config struct {
 	SkillsMaxSelected   int
 	SkillsMaxChars      int
 	SkillsReloadOnStart bool
+
+	// Skill learning (v2). The runtime may create reviewable skill proposals
+	// from runs; promotion always requires human approval (never automatic).
+	// AdminToken guards mutating endpoints — empty leaves them disabled.
+	SkillLearningEnabled bool
+	SkillProposalsDir    string
+	SkillAuditPath       string
+	AdminToken           string
+	SkillAutoPropose     bool
 }
 
 func Load(path string) (Config, error) {
@@ -122,6 +131,14 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	skillLearningEnabled, err := boolOrDefault(values, "ORBIS_SKILL_LEARNING_ENABLED", true)
+	if err != nil {
+		return Config{}, err
+	}
+	skillAutoPropose, err := boolOrDefault(values, "ORBIS_SKILL_AUTO_PROPOSE", false)
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg := Config{
 		Addr:          valueOrDefault(values, "ORBIS_ADDR", ":8080"),
@@ -149,6 +166,12 @@ func Load(path string) (Config, error) {
 		SkillsMaxSelected:   skillsMaxSelected,
 		SkillsMaxChars:      skillsMaxChars,
 		SkillsReloadOnStart: skillsReloadOnStart,
+
+		SkillLearningEnabled: skillLearningEnabled,
+		SkillProposalsDir:    valueOrDefault(values, "ORBIS_SKILL_PROPOSALS_DIR", "data/skill_proposals"),
+		SkillAuditPath:       valueOrDefault(values, "ORBIS_SKILL_AUDIT_PATH", "data/audit/skill_audit.jsonl"),
+		AdminToken:           strings.TrimSpace(values["ORBIS_ADMIN_TOKEN"]),
+		SkillAutoPropose:     skillAutoPropose,
 	}
 
 	if err := cfg.Validate(); err != nil {

@@ -168,6 +168,70 @@ ORBIS_SKILLS_RELOAD_ON_START=false
 	}
 }
 
+func TestLoadSkillLearningDefaults(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(envPath, []byte("ORBIS_LLM_MODEL=gpt-test\nOPENAI_API_KEY=test-key\n"), 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+
+	cfg, err := Load(envPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.SkillLearningEnabled {
+		t.Fatal("SkillLearningEnabled = false, want true by default")
+	}
+	if cfg.SkillProposalsDir != "data/skill_proposals" {
+		t.Fatalf("SkillProposalsDir = %q, want data/skill_proposals", cfg.SkillProposalsDir)
+	}
+	if cfg.SkillAuditPath != "data/audit/skill_audit.jsonl" {
+		t.Fatalf("SkillAuditPath = %q, want data/audit/skill_audit.jsonl", cfg.SkillAuditPath)
+	}
+	if cfg.AdminToken != "" {
+		t.Fatalf("AdminToken = %q, want empty by default (mutating endpoints disabled)", cfg.AdminToken)
+	}
+	if cfg.SkillAutoPropose {
+		t.Fatal("SkillAutoPropose = true, want false by default")
+	}
+}
+
+func TestLoadSkillLearningOverrides(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	content := []byte(`ORBIS_LLM_MODEL=gpt-test
+OPENAI_API_KEY=test-key
+ORBIS_SKILL_LEARNING_ENABLED=false
+ORBIS_SKILL_PROPOSALS_DIR=/tmp/proposals
+ORBIS_SKILL_AUDIT_PATH=/tmp/audit.jsonl
+ORBIS_ADMIN_TOKEN=dev-orbis-admin
+ORBIS_SKILL_AUTO_PROPOSE=true
+`)
+	if err := os.WriteFile(envPath, content, 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+
+	cfg, err := Load(envPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.SkillLearningEnabled {
+		t.Fatal("SkillLearningEnabled = true, want false")
+	}
+	if cfg.SkillProposalsDir != "/tmp/proposals" {
+		t.Fatalf("SkillProposalsDir = %q, want /tmp/proposals", cfg.SkillProposalsDir)
+	}
+	if cfg.SkillAuditPath != "/tmp/audit.jsonl" {
+		t.Fatalf("SkillAuditPath = %q, want /tmp/audit.jsonl", cfg.SkillAuditPath)
+	}
+	if cfg.AdminToken != "dev-orbis-admin" {
+		t.Fatalf("AdminToken = %q, want dev-orbis-admin", cfg.AdminToken)
+	}
+	if !cfg.SkillAutoPropose {
+		t.Fatal("SkillAutoPropose = false, want true")
+	}
+}
+
 func TestLoadRejectsInvalidSkillBool(t *testing.T) {
 	dir := t.TempDir()
 	envPath := filepath.Join(dir, ".env")
