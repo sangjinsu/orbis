@@ -28,13 +28,15 @@ type Selected struct {
 }
 
 // Score weights. Triggers are the strongest signal, then exact name, then tags
-// and related tools mentioned in the query.
+// and related tools mentioned in the query. scoreToolAvailable is a small boost
+// for skills whose related tools are actually enabled for the run.
 const (
-	scoreTrigger     = 10
-	scoreName        = 6
-	scoreTag         = 5
-	scoreRelatedTool = 4
-	scoreTitle       = 3
+	scoreTrigger       = 10
+	scoreName          = 6
+	scoreTag           = 5
+	scoreRelatedTool   = 4
+	scoreTitle         = 3
+	scoreToolAvailable = 2
 )
 
 // Select deterministically scores the snapshot against the input and returns the
@@ -44,13 +46,19 @@ const (
 // unrelated query returns an empty slice.
 func Select(snapshot []Entry, in SelectionInput, cfg SelectConfig) []Selected {
 	text := strings.ToLower(in.Text)
+	available := make(map[string]struct{}, len(in.ToolNames))
+	for _, name := range in.ToolNames {
+		if n := strings.ToLower(strings.TrimSpace(name)); n != "" {
+			available[n] = struct{}{}
+		}
+	}
 
 	candidates := make([]scoredEntry, 0, len(snapshot))
 	for _, e := range snapshot {
 		if e.Status != "" && e.Status != "active" {
 			continue
 		}
-		score, reason := scoreEntry(e, text)
+		score, reason := scoreEntry(e, text, available)
 		if score <= 0 {
 			continue
 		}
@@ -99,9 +107,9 @@ type scoredEntry struct {
 // substring-based on triggers, tags, related tool names, and the skill
 // name/title. Description text is intentionally not free-text matched in v1 to
 // keep selection predictable and avoid spurious matches.
-func scoreEntry(e Entry, text string) (int, string) {
+func scoreEntry(e Entry, text string, available map[string]struct{}) (int, string) {
 	score := 0
-	reasons := make([]string, 0, 4)
+	reasons := make([]string, 0, 5)
 
 	if n := countContains(text, e.Triggers); n > 0 {
 		score += scoreTrigger * n
@@ -119,12 +127,34 @@ func scoreEntry(e Entry, text string) (int, string) {
 		score += scoreRelatedTool * n
 		reasons = append(reasons, "related_tool")
 	}
+	if n := countAvailable(available, e.RelatedTools); n > 0 {
+		score += scoreToolAvailable * n
+		reasons = append(reasons, "tool_available")
+	}
 	if title := strings.ToLower(strings.TrimSpace(e.Title)); title != "" && strings.Contains(text, title) {
 		score += scoreTitle
 		reasons = append(reasons, "title")
 	}
 
 	return score, strings.Join(reasons, ",")
+}
+
+// countAvailable returns how many of the values name a tool present in the
+// available set (case-insensitive). It lets a skill rank higher when its related
+// tools are actually enabled for the run, independent of the query text.
+func countAvailable(available map[string]struct{}, values []string) int {
+	if len(available) == 0 {
+		return 0
+	}
+	count := 0
+	for _, v := range values {
+		if name := strings.ToLower(strings.TrimSpace(v)); name != "" {
+			if _, ok := available[name]; ok {
+				count++
+			}
+		}
+	}
+	return count
 }
 
 // countContains returns how many of the values appear as a substring of text.
