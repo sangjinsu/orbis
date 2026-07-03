@@ -43,6 +43,21 @@ const (
 	EventSkillApplied  EventType = "SkillApplied"
 	EventSkillSkipped  EventType = "SkillSkipped"
 
+	// Skill learning (v2). The reviewable skill learning loop emits these from
+	// the app-layer learning service (never the reducer): proposals are created
+	// from runs, reviewed by a human, and only an explicit approval promotes one
+	// to an active skill. Payloads carry metadata only.
+	EventSkillCandidateDetected    EventType = "SkillCandidateDetected"
+	EventSkillProposalCreated      EventType = "SkillProposalCreated"
+	EventSkillReviewRequired       EventType = "SkillReviewRequired"
+	EventSkillProposalApproved     EventType = "SkillProposalApproved"
+	EventSkillProposalRejected     EventType = "SkillProposalRejected"
+	EventSkillPromoted             EventType = "SkillPromoted"
+	EventSkillPromotionFailed      EventType = "SkillPromotionFailed"
+	EventSkillIndexReloadRequested EventType = "SkillIndexReloadRequested"
+	EventSkillIndexReloaded        EventType = "SkillIndexReloaded"
+	EventSkillAuditRecorded        EventType = "SkillAuditRecorded"
+
 	// Reserved skill-index observability event types. Defined now for a stable
 	// vocabulary but not yet emitted, mirroring EventToolCallProposed.
 	EventSkillIndexLoaded        EventType = "SkillIndexLoaded"

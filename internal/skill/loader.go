@@ -1,8 +1,6 @@
 package skill
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,11 +22,10 @@ func loadEntry(dir string, m Metadata) (Entry, error) {
 	if strings.TrimSpace(body) == "" {
 		return Entry{}, fmt.Errorf("skill body %q is empty: %s", m.ID, bodyPath)
 	}
-	sum := sha256.Sum256(data)
 	return Entry{
 		Metadata:    m,
 		Body:        body,
-		ContentHash: hex.EncodeToString(sum[:]),
+		ContentHash: contentHash(body),
 		Chars:       utf8.RuneCountInString(body),
 	}, nil
 }
