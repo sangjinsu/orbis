@@ -18,16 +18,22 @@ import (
 )
 
 type RuntimeServiceConfig struct {
-	Store         store.Store
-	Broker        EventBroker
-	LLMProvider   worker.LLMProvider
-	ToolRunner    orbisruntime.ToolRunner
-	ToolSchemas   []tool.ToolSchema
-	SkillBodies   skill.Bodies
-	SkillCatalog  SkillCatalog
-	ReducerConfig orbisruntime.ReducerConfig
-	RunTimeout    time.Duration
-	Now           func() time.Time
+	Store        store.Store
+	Broker       EventBroker
+	LLMProvider  worker.LLMProvider
+	ToolRunner   orbisruntime.ToolRunner
+	ToolSchemas  []tool.ToolSchema
+	SkillBodies  skill.Bodies
+	SkillCatalog SkillCatalog
+	// Skill learning (v2). A nil ProposalStore disables the learning loop.
+	// SkillAutoPropose only creates pending proposals from completed runs; it
+	// never promotes anything.
+	ProposalStore    *skill.ProposalStore
+	AuditLog         *skill.AuditLog
+	SkillAutoPropose bool
+	ReducerConfig    orbisruntime.ReducerConfig
+	RunTimeout       time.Duration
+	Now              func() time.Time
 }
 
 type EventBroker interface {
@@ -46,6 +52,9 @@ type RuntimeService struct {
 	llmProvider worker.LLMProvider
 	reducerCfg  orbisruntime.ReducerConfig
 	skills      SkillCatalog
+	proposals   *skill.ProposalStore
+	auditLog    *skill.AuditLog
+	autoPropose bool
 
 	runMu      sync.Mutex
 	activeRuns map[string]*runExecution
@@ -110,6 +119,9 @@ func NewRuntimeService(cfg RuntimeServiceConfig) *RuntimeService {
 		llmProvider: cfg.LLMProvider,
 		reducerCfg:  cfg.ReducerConfig,
 		skills:      cfg.SkillCatalog,
+		proposals:   cfg.ProposalStore,
+		auditLog:    cfg.AuditLog,
+		autoPropose: cfg.SkillAutoPropose,
 		activeRuns:  map[string]*runExecution{},
 		runTimeout:  cfg.RunTimeout,
 		quit:        make(chan struct{}),
@@ -427,6 +439,16 @@ func (s *RuntimeService) handleEvent(ctx context.Context, event domain.Event) er
 	}
 	if event.Type == domain.EventTimerFired {
 		s.clearRun(event.RunID)
+	}
+	// Auto-propose (off by default) creates a pending skill proposal from a
+	// completed run. It runs in a tracked goroutine after the lane persisted the
+	// terminal state, only ever creates a proposal (never promotes), and drops
+	// non-candidate runs silently — the detector is the filter.
+	if event.Type == domain.EventRunCompleted && s.autoPropose && s.proposals != nil {
+		runID := event.RunID
+		s.goTrack(func() {
+			_, _ = s.CreateSkillProposalFromRun(context.Background(), runID, skill.ActorSystem, false)
+		})
 	}
 	if isTerminalEvent(event.Type) {
 		s.clearRun(event.RunID)
