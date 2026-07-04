@@ -103,7 +103,22 @@ func (s *RuntimeService) handleSkillGet(_ context.Context, req protocol.ClientRe
 	return marshalPayload(detail)
 }
 
-func (s *RuntimeService) handleSkillReload(_ context.Context, _ protocol.ClientRequest) (json.RawMessage, error) {
+type skillReloadParams struct {
+	Token string `json:"token"`
+}
+
+// handleSkillReload is a mutating operation as of v2: it requires the admin
+// token in params, and with no token configured it is disabled entirely.
+func (s *RuntimeService) handleSkillReload(_ context.Context, req protocol.ClientRequest) (json.RawMessage, error) {
+	var params skillReloadParams
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return nil, fmt.Errorf("decode skill.reload params: %w", err)
+		}
+	}
+	if err := s.requireAdmin(params.Token); err != nil {
+		return nil, err
+	}
 	if err := s.ReloadSkills(); err != nil {
 		return nil, fmt.Errorf("reload skills: %w", err)
 	}

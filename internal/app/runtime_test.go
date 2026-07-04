@@ -603,6 +603,7 @@ func TestRuntimeServiceSkillListGetReload(t *testing.T) {
 	service := NewRuntimeService(RuntimeServiceConfig{
 		Store:        store.NewFileStore(t.TempDir()),
 		SkillCatalog: catalog,
+		AdminToken:   "admin-tok",
 		Now:          func() time.Time { return time.Unix(1700000000, 0).UTC() },
 	})
 	defer service.Close()
@@ -635,7 +636,11 @@ func TestRuntimeServiceSkillListGetReload(t *testing.T) {
 		t.Fatal("skill.get unknown error = nil, want not-found error")
 	}
 
-	if _, err := service.HandleClientRequest(ctx, protocol.ClientRequest{Type: "req", ID: "reload_1", Method: "skill.reload"}); err != nil {
+	// skill.reload is mutating as of v2 and requires the admin token.
+	if _, err := service.HandleClientRequest(ctx, protocol.ClientRequest{Type: "req", ID: "reload_0", Method: "skill.reload"}); err == nil {
+		t.Fatal("skill.reload without token error = nil, want invalid-token error")
+	}
+	if _, err := service.HandleClientRequest(ctx, protocol.ClientRequest{Type: "req", ID: "reload_1", Method: "skill.reload", Params: json.RawMessage(`{"token":"admin-tok"}`)}); err != nil {
 		t.Fatalf("skill.reload error = %v", err)
 	}
 	if catalog.reloadCount != 1 {
@@ -843,6 +848,283 @@ func TestCreateSkillProposalRequiresLearningEnabled(t *testing.T) {
 	if _, err := service.CreateSkillProposalFromRun(context.Background(), "run_x", "developer", true); !errors.Is(err, errSkillLearningDisabled) {
 		t.Fatalf("error = %v, want errSkillLearningDisabled", err)
 	}
+}
+
+// newReviewService wires the full v2 review loop: the learning stores plus a
+// real skill store (empty index) and promoter over a temp skills directory,
+// guarded by an admin token.
+func newReviewService(t *testing.T) (*RuntimeService, *skill.ProposalStore, *skill.Store, *store.FileStore, string, string, <-chan protocol.RuntimeEvent, func()) {
+	t.Helper()
+	fileStore := store.NewFileStore(t.TempDir())
+	eventBroker := broker.New()
+	events, unsubscribe := eventBroker.Subscribe(context.Background(), "session_1")
+
+	skillsDir := filepath.Join(fileStore.Root(), "skills")
+	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
+		t.Fatalf("create skills dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillsDir, "index.json"), []byte(`{"skills":[]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write empty index: %v", err)
+	}
+	skillStore, err := skill.NewStore(skillsDir)
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	proposals, err := skill.NewProposalStore(filepath.Join(fileStore.Root(), "skill_proposals"))
+	if err != nil {
+		t.Fatalf("NewProposalStore() error = %v", err)
+	}
+	auditPath := filepath.Join(fileStore.Root(), "audit", "skill_audit.jsonl")
+	service := NewRuntimeService(RuntimeServiceConfig{
+		Store:         fileStore,
+		Broker:        eventBroker,
+		LLMProvider:   toolRunProvider(),
+		ToolRunner:    mockToolWorker(t, fileStore),
+		SkillCatalog:  skillStore,
+		ProposalStore: proposals,
+		AuditLog:      skill.NewAuditLog(auditPath),
+		Promoter:      skill.NewPromoter(skillsDir),
+		AdminToken:    "admin-tok",
+		Now:           func() time.Time { return time.Unix(1700000000, 0).UTC() },
+	})
+	return service, proposals, skillStore, fileStore, skillsDir, auditPath, events, unsubscribe
+}
+
+func TestRuntimeServiceApproveFlowPromotesAndReloads(t *testing.T) {
+	ctx := context.Background()
+	service, _, skillStore, fileStore, skillsDir, auditPath, events, unsubscribe := newReviewService(t)
+	defer unsubscribe()
+	defer service.Close()
+	runID := completeToolRun(t, service, fileStore, events)
+
+	// Create through the WS method (covers the admin-token path).
+	createPayload, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
+		Type: "req", ID: "sp_create", Method: "skill.proposal.create_from_run",
+		Params: json.RawMessage(`{"run_id":"` + runID + `","token":"admin-tok"}`),
+	})
+	if err != nil {
+		t.Fatalf("skill.proposal.create_from_run error = %v", err)
+	}
+	var created protocol.SkillProposalDetailPayload
+	if err := json.Unmarshal(createPayload, &created); err != nil {
+		t.Fatalf("unmarshal created proposal: %v", err)
+	}
+	_ = collectRuntimeEventsUntil(t, events, string(domain.EventSkillReviewRequired))
+
+	// Approve: the proposal is promoted, the index reloads, and the lifecycle is
+	// observable in order.
+	approvePayload, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
+		Type: "req", ID: "sp_approve", Method: "skill.proposal.approve",
+		Params: json.RawMessage(`{"proposal_id":"` + created.ProposalID + `","token":"admin-tok"}`),
+	})
+	if err != nil {
+		t.Fatalf("skill.proposal.approve error = %v", err)
+	}
+	var promoted protocol.SkillProposalDetailPayload
+	if err := json.Unmarshal(approvePayload, &promoted); err != nil {
+		t.Fatalf("unmarshal promoted proposal: %v", err)
+	}
+	if promoted.Status != string(skill.ProposalPromoted) || promoted.PromotedSkillID == "" {
+		t.Fatalf("approve payload = %#v, want promoted with skill id", promoted.SkillProposalSummary)
+	}
+
+	received := collectRuntimeEventsUntil(t, events, string(domain.EventSkillAuditRecorded))
+	assertOrderedSubsequence(t, eventNames(received),
+		string(domain.EventSkillProposalApproved),
+		string(domain.EventSkillPromoted),
+		string(domain.EventSkillIndexReloadRequested),
+		string(domain.EventSkillIndexReloaded),
+		string(domain.EventSkillAuditRecorded),
+	)
+
+	// Promoted skill exists on disk and in the reloaded in-memory index.
+	if _, err := os.Stat(filepath.Join(skillsDir, promoted.PromotedSkillID+".md")); err != nil {
+		t.Fatalf("promoted body file missing: %v", err)
+	}
+	entry, ok := skillStore.Get(promoted.PromotedSkillID)
+	if !ok {
+		t.Fatal("promoted skill not in the reloaded index")
+	}
+	if entry.SourceProposalID != created.ProposalID || entry.SourceRunID != runID {
+		t.Fatalf("promoted provenance = %#v, want proposal/run ids", entry.Metadata)
+	}
+
+	// The learned skill is selectable via its related tool being enabled.
+	selected := skill.Select(skillStore.Snapshot(), skill.SelectionInput{ToolNames: []string{"echo"}}, skill.SelectConfig{MaxSelected: 3})
+	if len(selected) != 1 || selected[0].Ref.ID != promoted.PromotedSkillID {
+		t.Fatalf("Select() = %#v, want the promoted skill via tool availability", selected)
+	}
+
+	audit, err := os.ReadFile(auditPath)
+	if err != nil || !strings.Contains(string(audit), string(domain.EventSkillProposalApproved)) || !strings.Contains(string(audit), string(domain.EventSkillPromoted)) {
+		t.Fatalf("audit log missing approve/promote records: %v\n%s", err, audit)
+	}
+
+	// A promoted proposal cannot be approved again.
+	if _, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
+		Type: "req", ID: "sp_again", Method: "skill.proposal.approve",
+		Params: json.RawMessage(`{"proposal_id":"` + created.ProposalID + `","token":"admin-tok"}`),
+	}); err == nil {
+		t.Fatal("second approve error = nil, want not-pending error")
+	}
+}
+
+func TestRuntimeServiceRejectFlow(t *testing.T) {
+	ctx := context.Background()
+	service, proposals, _, fileStore, _, auditPath, events, unsubscribe := newReviewService(t)
+	defer unsubscribe()
+	defer service.Close()
+	runID := completeToolRun(t, service, fileStore, events)
+
+	proposal, err := service.CreateSkillProposalFromRun(ctx, runID, skill.ActorDeveloper, true)
+	if err != nil {
+		t.Fatalf("CreateSkillProposalFromRun() error = %v", err)
+	}
+	_ = collectRuntimeEventsUntil(t, events, string(domain.EventSkillReviewRequired))
+
+	rejectPayload, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
+		Type: "req", ID: "sp_reject", Method: "skill.proposal.reject",
+		Params: json.RawMessage(`{"proposal_id":"` + proposal.ProposalID + `","reason":"too narrow","token":"admin-tok"}`),
+	})
+	if err != nil {
+		t.Fatalf("skill.proposal.reject error = %v", err)
+	}
+	var rejected protocol.SkillProposalDetailPayload
+	if err := json.Unmarshal(rejectPayload, &rejected); err != nil {
+		t.Fatalf("unmarshal rejected proposal: %v", err)
+	}
+	if rejected.Status != string(skill.ProposalRejected) {
+		t.Fatalf("status = %q, want rejected", rejected.Status)
+	}
+
+	received := collectRuntimeEventsUntil(t, events, string(domain.EventSkillAuditRecorded))
+	assertOrderedSubsequence(t, eventNames(received),
+		string(domain.EventSkillProposalRejected),
+		string(domain.EventSkillAuditRecorded),
+	)
+	stored, err := proposals.Get(proposal.ProposalID)
+	if err != nil || stored.Status != skill.ProposalRejected {
+		t.Fatalf("stored proposal = %#v, %v; want rejected", stored, err)
+	}
+	audit, err := os.ReadFile(auditPath)
+	if err != nil || !strings.Contains(string(audit), string(domain.EventSkillProposalRejected)) {
+		t.Fatalf("audit log missing reject record: %v", err)
+	}
+
+	// A rejected proposal cannot be approved.
+	if _, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
+		Type: "req", ID: "sp_late", Method: "skill.proposal.approve",
+		Params: json.RawMessage(`{"proposal_id":"` + proposal.ProposalID + `","token":"admin-tok"}`),
+	}); err == nil {
+		t.Fatal("approve after reject error = nil, want not-pending error")
+	}
+}
+
+func TestRuntimeServiceApproveConflictMarksFailed(t *testing.T) {
+	ctx := context.Background()
+	service, proposals, skillStore, fileStore, skillsDir, auditPath, events, unsubscribe := newReviewService(t)
+	defer unsubscribe()
+	defer service.Close()
+	runID := completeToolRun(t, service, fileStore, events)
+
+	// Seed the active index with the id the proposal will target.
+	seed := `{"skills":[{"id":"existing-skill","name":"existing","path":"existing-skill.md","status":"active","priority":100}]}`
+	if err := os.WriteFile(filepath.Join(skillsDir, "index.json"), []byte(seed+"\n"), 0o644); err != nil {
+		t.Fatalf("seed index: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillsDir, "existing-skill.md"), []byte("existing body"), 0o644); err != nil {
+		t.Fatalf("seed body: %v", err)
+	}
+	if err := skillStore.Reload(); err != nil {
+		t.Fatalf("Reload() error = %v", err)
+	}
+
+	now := time.Unix(1700000000, 0).UTC()
+	conflicting := skill.SkillProposal{
+		ProposalID:  "prop_conflict",
+		SourceRunID: runID,
+		Title:       "Conflicting proposal",
+		SkillID:     "existing-skill",
+		Body:        "# Conflicting proposal\n\nBody.",
+		Status:      skill.ProposalPending,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := proposals.Create(conflicting); err != nil {
+		t.Fatalf("Create(conflicting) error = %v", err)
+	}
+
+	if _, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
+		Type: "req", ID: "sp_conflict", Method: "skill.proposal.approve",
+		Params: json.RawMessage(`{"proposal_id":"prop_conflict","token":"admin-tok"}`),
+	}); err == nil {
+		t.Fatal("approve conflicting proposal error = nil, want conflict error")
+	}
+
+	received := collectRuntimeEventsUntil(t, events, string(domain.EventSkillAuditRecorded))
+	assertOrderedSubsequence(t, eventNames(received),
+		string(domain.EventSkillProposalApproved),
+		string(domain.EventSkillPromotionFailed),
+		string(domain.EventSkillAuditRecorded),
+	)
+	stored, err := proposals.Get("prop_conflict")
+	if err != nil || stored.Status != skill.ProposalFailed {
+		t.Fatalf("stored proposal = %#v, %v; want failed", stored, err)
+	}
+	audit, err := os.ReadFile(auditPath)
+	if err != nil || !strings.Contains(string(audit), string(domain.EventSkillPromotionFailed)) {
+		t.Fatalf("audit log missing promotion-failed record: %v", err)
+	}
+}
+
+func TestSkillLearningWSAdminGating(t *testing.T) {
+	ctx := context.Background()
+
+	// No admin token configured: mutating methods are disabled entirely.
+	fileStore := store.NewFileStore(t.TempDir())
+	noToken := NewRuntimeService(RuntimeServiceConfig{
+		Store:         fileStore,
+		LLMProvider:   &fakeProvider{response: worker.LLMResponse{Text: "ok"}},
+		ProposalStore: mustProposalStore(t, fileStore),
+		Now:           func() time.Time { return time.Unix(1700000000, 0).UTC() },
+	})
+	defer noToken.Close()
+	if _, err := noToken.HandleClientRequest(ctx, protocol.ClientRequest{
+		Type: "req", ID: "g1", Method: "skill.proposal.approve",
+		Params: json.RawMessage(`{"proposal_id":"p","token":"anything"}`),
+	}); !errors.Is(err, errAdminDisabled) {
+		t.Fatalf("error = %v, want errAdminDisabled", err)
+	}
+
+	// Token configured: a wrong token is rejected, reads stay open.
+	withToken := NewRuntimeService(RuntimeServiceConfig{
+		Store:         store.NewFileStore(t.TempDir()),
+		LLMProvider:   &fakeProvider{response: worker.LLMResponse{Text: "ok"}},
+		ProposalStore: mustProposalStore(t, fileStore),
+		AdminToken:    "admin-tok",
+		Now:           func() time.Time { return time.Unix(1700000000, 0).UTC() },
+	})
+	defer withToken.Close()
+	if _, err := withToken.HandleClientRequest(ctx, protocol.ClientRequest{
+		Type: "req", ID: "g2", Method: "skill.proposal.create_from_run",
+		Params: json.RawMessage(`{"run_id":"run_x","token":"wrong"}`),
+	}); !errors.Is(err, errInvalidAdminToken) {
+		t.Fatalf("error = %v, want errInvalidAdminToken", err)
+	}
+	if _, err := withToken.HandleClientRequest(ctx, protocol.ClientRequest{
+		Type: "req", ID: "g3", Method: "skill.proposal.list",
+	}); err != nil {
+		t.Fatalf("skill.proposal.list without token error = %v, want open read", err)
+	}
+}
+
+func mustProposalStore(t *testing.T, fileStore *store.FileStore) *skill.ProposalStore {
+	t.Helper()
+	proposals, err := skill.NewProposalStore(filepath.Join(fileStore.Root(), "skill_proposals"))
+	if err != nil {
+		t.Fatalf("NewProposalStore() error = %v", err)
+	}
+	return proposals
 }
 
 type fakeSkillCatalog struct {

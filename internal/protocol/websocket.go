@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"time"
 
 	"github.com/sangjinsu/orbis/internal/domain"
 )
@@ -83,4 +84,42 @@ type SkillDetailPayload struct {
 // is the number of skills available after the reload.
 type SkillReloadPayload struct {
 	Count int `json:"count"`
+}
+
+// SkillProposalSummary is the wire view of a reviewable skill proposal (v2).
+// A proposal is never an active skill: it must be explicitly approved and
+// promoted first.
+type SkillProposalSummary struct {
+	ProposalID       string    `json:"proposal_id"`
+	SourceRunID      string    `json:"source_run_id"`
+	SkillID          string    `json:"skill_id"`
+	Title            string    `json:"title"`
+	Status           string    `json:"status"`
+	RationaleSummary string    `json:"rationale_summary,omitempty"`
+	Version          string    `json:"version,omitempty"`
+	ContentHash      string    `json:"content_hash,omitempty"`
+	PromotedSkillID  string    `json:"promoted_skill_id,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+// SkillProposalListPayload is the response to skill.proposal.list /
+// GET /skill-proposals.
+type SkillProposalListPayload struct {
+	Proposals []SkillProposalSummary `json:"proposals"`
+}
+
+// SkillProposalDetailPayload adds the reviewable sections and the markdown body
+// that would become the skill file on promotion.
+type SkillProposalDetailPayload struct {
+	SkillProposalSummary
+	Purpose         string   `json:"purpose,omitempty"`
+	WhenToUse       string   `json:"when_to_use,omitempty"`
+	RequiredContext []string `json:"required_context,omitempty"`
+	Procedure       []string `json:"procedure,omitempty"`
+	RelatedTools    []string `json:"related_tools,omitempty"`
+	Verification    []string `json:"verification,omitempty"`
+	Pitfalls        []string `json:"pitfalls,omitempty"`
+	SourceEventIDs  []string `json:"source_event_ids,omitempty"`
+	Body            string   `json:"body"`
 }

@@ -27,9 +27,13 @@ type RuntimeServiceConfig struct {
 	SkillCatalog SkillCatalog
 	// Skill learning (v2). A nil ProposalStore disables the learning loop.
 	// SkillAutoPropose only creates pending proposals from completed runs; it
-	// never promotes anything.
+	// never promotes anything. Promotion additionally requires the Promoter and
+	// an explicit admin-authenticated approval; an empty AdminToken disables all
+	// mutating skill-learning operations.
 	ProposalStore    *skill.ProposalStore
 	AuditLog         *skill.AuditLog
+	Promoter         *skill.Promoter
+	AdminToken       string
 	SkillAutoPropose bool
 	ReducerConfig    orbisruntime.ReducerConfig
 	RunTimeout       time.Duration
@@ -54,6 +58,8 @@ type RuntimeService struct {
 	skills      SkillCatalog
 	proposals   *skill.ProposalStore
 	auditLog    *skill.AuditLog
+	promoter    *skill.Promoter
+	adminToken  string
 	autoPropose bool
 
 	runMu      sync.Mutex
@@ -121,6 +127,8 @@ func NewRuntimeService(cfg RuntimeServiceConfig) *RuntimeService {
 		skills:      cfg.SkillCatalog,
 		proposals:   cfg.ProposalStore,
 		auditLog:    cfg.AuditLog,
+		promoter:    cfg.Promoter,
+		adminToken:  cfg.AdminToken,
 		autoPropose: cfg.SkillAutoPropose,
 		activeRuns:  map[string]*runExecution{},
 		runTimeout:  cfg.RunTimeout,
@@ -203,6 +211,16 @@ func (s *RuntimeService) HandleClientRequest(ctx context.Context, req protocol.C
 		return s.handleSkillGet(ctx, req)
 	case "skill.reload":
 		return s.handleSkillReload(ctx, req)
+	case "skill.proposal.list":
+		return s.handleSkillProposalList(ctx, req)
+	case "skill.proposal.get":
+		return s.handleSkillProposalGet(ctx, req)
+	case "skill.proposal.create_from_run":
+		return s.handleSkillProposalCreate(ctx, req)
+	case "skill.proposal.approve":
+		return s.handleSkillProposalApprove(ctx, req)
+	case "skill.proposal.reject":
+		return s.handleSkillProposalReject(ctx, req)
 	default:
 		return nil, fmt.Errorf("unsupported method %q", req.Method)
 	}

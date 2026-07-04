@@ -50,6 +50,7 @@ func NewHTTPServer(cfg config.Config) (*http.Server, *RuntimeService, error) {
 	// data lives under data/ (never .workspace); nil when learning is disabled.
 	var proposalStore *skill.ProposalStore
 	var auditLog *skill.AuditLog
+	var promoter *skill.Promoter
 	if cfg.SkillLearningEnabled {
 		ps, err := skill.NewProposalStore(cfg.SkillProposalsDir)
 		if err != nil {
@@ -57,6 +58,11 @@ func NewHTTPServer(cfg config.Config) (*http.Server, *RuntimeService, error) {
 		}
 		proposalStore = ps
 		auditLog = skill.NewAuditLog(cfg.SkillAuditPath)
+		// Promotion writes into the active skills directory, so it additionally
+		// requires skills to be enabled.
+		if cfg.SkillsEnabled {
+			promoter = skill.NewPromoter(cfg.SkillsDir)
+		}
 	}
 
 	registry := tool.NewRegistry()
@@ -99,6 +105,8 @@ func NewHTTPServer(cfg config.Config) (*http.Server, *RuntimeService, error) {
 		SkillCatalog:     skillCatalog,
 		ProposalStore:    proposalStore,
 		AuditLog:         auditLog,
+		Promoter:         promoter,
+		AdminToken:       cfg.AdminToken,
 		SkillAutoPropose: cfg.SkillAutoPropose,
 		ReducerConfig: orbisruntime.ReducerConfig{
 			ToolTimeout:               cfg.ToolTimeoutDefault,
@@ -117,11 +125,16 @@ func NewHTTPServer(cfg config.Config) (*http.Server, *RuntimeService, error) {
 	handlerOpts := []gateway.HandlerOption{
 		gateway.WithBroker(eventBroker),
 		gateway.WithReadTimeout(cfg.WSReadTimeout),
+		gateway.WithAdmin(cfg.AdminToken),
 	}
 	// Expose the read-only skill HTTP endpoints only when skills are enabled, so
 	// /skills 404s in a skills-disabled deployment.
 	if cfg.SkillsEnabled {
 		handlerOpts = append(handlerOpts, gateway.WithSkills(runtime))
+	}
+	// Expose the skill-proposal review endpoints only when learning is enabled.
+	if proposalStore != nil {
+		handlerOpts = append(handlerOpts, gateway.WithSkillLearning(runtime))
 	}
 	return &http.Server{
 		Addr:    cfg.Addr,

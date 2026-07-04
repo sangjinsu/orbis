@@ -5,7 +5,11 @@
 // computation inside the reducer, while disk I/O is confined to load/reload.
 package skill
 
-import "github.com/sangjinsu/orbis/internal/domain"
+import (
+	"time"
+
+	"github.com/sangjinsu/orbis/internal/domain"
+)
 
 // Metadata is a Level 0 skill index entry: enough to find and score a skill
 // without loading its body. It mirrors the shape of data/skills/index.json.
@@ -21,6 +25,13 @@ type Metadata struct {
 	Status       string   `json:"status"`
 	Priority     int      `json:"priority"`
 	RelatedTools []string `json:"related_tools"`
+
+	// Provenance for promoted (learned) skills; empty on curated seed skills.
+	// The promoted body's content hash is recorded on the source proposal and
+	// re-derived as Entry.ContentHash at load, so it is not duplicated here.
+	SourceProposalID string    `json:"source_proposal_id,omitempty"`
+	SourceRunID      string    `json:"source_run_id,omitempty"`
+	CreatedAt        time.Time `json:"created_at,omitzero"`
 }
 
 // Entry is an in-memory skill: index metadata plus the loaded body and the

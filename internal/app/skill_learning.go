@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/sangjinsu/orbis/internal/domain"
+	"github.com/sangjinsu/orbis/internal/protocol"
 	"github.com/sangjinsu/orbis/internal/skill"
 	"github.com/sangjinsu/orbis/internal/store"
 )
@@ -127,4 +128,388 @@ func (s *RuntimeService) emitSkillLearningEvent(ctx context.Context, sessionID, 
 		CreatedAt: s.now(),
 		Payload:   encoded,
 	})
+}
+
+// Admin protection for mutating skill-learning operations. With no token
+// configured the mutating endpoints are disabled entirely (the safe default);
+// read endpoints stay open.
+var (
+	errAdminDisabled     = errors.New("admin endpoints are disabled: ORBIS_ADMIN_TOKEN is not configured")
+	errInvalidAdminToken = errors.New("invalid admin token")
+)
+
+func (s *RuntimeService) requireAdmin(token string) error {
+	if s.adminToken == "" {
+		return errAdminDisabled
+	}
+	if token != s.adminToken {
+		return errInvalidAdminToken
+	}
+	return nil
+}
+
+// proposalSummary maps a stored proposal to its wire summary.
+func proposalSummary(p skill.SkillProposal) protocol.SkillProposalSummary {
+	return protocol.SkillProposalSummary{
+		ProposalID:       p.ProposalID,
+		SourceRunID:      p.SourceRunID,
+		SkillID:          p.SkillID,
+		Title:            p.Title,
+		Status:           string(p.Status),
+		RationaleSummary: p.RationaleSummary,
+		Version:          p.Version,
+		ContentHash:      p.ContentHash,
+		PromotedSkillID:  p.PromotedSkillID,
+		CreatedAt:        p.CreatedAt,
+		UpdatedAt:        p.UpdatedAt,
+	}
+}
+
+// proposalDetail maps a stored proposal to its full wire payload.
+func proposalDetail(p skill.SkillProposal) protocol.SkillProposalDetailPayload {
+	return protocol.SkillProposalDetailPayload{
+		SkillProposalSummary: proposalSummary(p),
+		Purpose:              p.Purpose,
+		WhenToUse:            p.WhenToUse,
+		RequiredContext:      p.RequiredContext,
+		Procedure:            p.Procedure,
+		RelatedTools:         p.RelatedTools,
+		Verification:         p.Verification,
+		Pitfalls:             p.Pitfalls,
+		SourceEventIDs:       p.SourceEventIDs,
+		Body:                 p.Body,
+	}
+}
+
+// ListSkillProposals returns proposals as wire summaries, optionally filtered
+// by status. It implements gateway.SkillLearning so HTTP and WS share one impl.
+func (s *RuntimeService) ListSkillProposals(status string) (protocol.SkillProposalListPayload, error) {
+	payload := protocol.SkillProposalListPayload{Proposals: []protocol.SkillProposalSummary{}}
+	if s.proposals == nil {
+		return payload, errSkillLearningDisabled
+	}
+	list, err := s.proposals.List(skill.SkillProposalStatus(status))
+	if err != nil {
+		return payload, err
+	}
+	for _, p := range list {
+		payload.Proposals = append(payload.Proposals, proposalSummary(p))
+	}
+	return payload, nil
+}
+
+// GetSkillProposal returns one proposal, with found=false for unknown ids.
+func (s *RuntimeService) GetSkillProposal(id string) (protocol.SkillProposalDetailPayload, bool, error) {
+	if s.proposals == nil {
+		return protocol.SkillProposalDetailPayload{}, false, errSkillLearningDisabled
+	}
+	p, err := s.proposals.Get(id)
+	if errors.Is(err, skill.ErrProposalNotFound) {
+		return protocol.SkillProposalDetailPayload{}, false, nil
+	}
+	if err != nil {
+		return protocol.SkillProposalDetailPayload{}, false, err
+	}
+	return proposalDetail(p), true, nil
+}
+
+// CreateSkillProposal creates a proposal from a run for an admin-authenticated
+// caller (gateway HTTP / WS after the token check).
+func (s *RuntimeService) CreateSkillProposal(ctx context.Context, runID string) (protocol.SkillProposalDetailPayload, error) {
+	p, err := s.CreateSkillProposalFromRun(ctx, runID, skill.ActorAdmin, true)
+	if err != nil {
+		return protocol.SkillProposalDetailPayload{}, err
+	}
+	return proposalDetail(p), nil
+}
+
+// ApproveSkillProposal approves and promotes a pending proposal.
+func (s *RuntimeService) ApproveSkillProposal(ctx context.Context, id string) (protocol.SkillProposalDetailPayload, error) {
+	p, err := s.approveSkillProposal(ctx, id, skill.ActorAdmin)
+	if err != nil {
+		return protocol.SkillProposalDetailPayload{}, err
+	}
+	return proposalDetail(p), nil
+}
+
+// RejectSkillProposal rejects a pending proposal.
+func (s *RuntimeService) RejectSkillProposal(ctx context.Context, id, reason string) (protocol.SkillProposalDetailPayload, error) {
+	p, err := s.rejectSkillProposal(ctx, id, skill.ActorAdmin, reason)
+	if err != nil {
+		return protocol.SkillProposalDetailPayload{}, err
+	}
+	return proposalDetail(p), nil
+}
+
+// approveSkillProposal drives the reviewed promotion flow:
+// approve -> promote -> reload, emitting
+// SkillProposalApproved -> SkillPromoted -> SkillIndexReloadRequested ->
+// SkillIndexReloaded -> SkillAuditRecorded. On a promotion failure (e.g. a
+// skill-id conflict) the proposal is marked failed and SkillPromotionFailed is
+// emitted instead. Only pending proposals can be approved.
+func (s *RuntimeService) approveSkillProposal(ctx context.Context, proposalID, actor string) (skill.SkillProposal, error) {
+	if s.proposals == nil {
+		return skill.SkillProposal{}, errSkillLearningDisabled
+	}
+	proposal, err := s.proposals.Get(proposalID)
+	if err != nil {
+		return skill.SkillProposal{}, err
+	}
+	// Resolve the source session up front so every lifecycle event can be
+	// emitted; an unresolvable source run fails the operation before any change.
+	run, err := s.store.LoadRun(ctx, proposal.SourceRunID)
+	if err != nil {
+		return skill.SkillProposal{}, fmt.Errorf("load source run: %w", err)
+	}
+	sessionID := run.SessionID
+	if proposal.Status != skill.ProposalPending {
+		return skill.SkillProposal{}, fmt.Errorf("proposal %q is %s, not pending", proposalID, proposal.Status)
+	}
+
+	now := s.now()
+	proposal.Status = skill.ProposalApproved
+	proposal.ApprovedAt = &now
+	proposal.UpdatedAt = now
+	if err := s.proposals.Update(proposal); err != nil {
+		return skill.SkillProposal{}, err
+	}
+	if err := s.appendSkillAudit(string(domain.EventSkillProposalApproved), proposal, actor, "proposal approved"); err != nil {
+		return skill.SkillProposal{}, err
+	}
+	if err := s.emitSkillLearningEvent(ctx, sessionID, proposal.SourceRunID, proposal.SourceRunID+":skill_proposal_approved", domain.EventSkillProposalApproved, skillLearningEventPayload{
+		ProposalID: proposal.ProposalID, SkillID: proposal.SkillID, Status: string(proposal.Status),
+	}); err != nil {
+		return skill.SkillProposal{}, err
+	}
+
+	if s.promoter == nil {
+		return s.failPromotion(ctx, sessionID, proposal, actor, errors.New("skill promotion requires an active skills directory"))
+	}
+	meta, err := s.promoter.Promote(proposal, now)
+	if err != nil {
+		return s.failPromotion(ctx, sessionID, proposal, actor, err)
+	}
+
+	proposal.Status = skill.ProposalPromoted
+	proposal.PromotedSkillID = meta.ID
+	proposal.Version = meta.Version
+	proposal.UpdatedAt = s.now()
+	if err := s.proposals.Update(proposal); err != nil {
+		return skill.SkillProposal{}, err
+	}
+	if err := s.appendSkillAudit(string(domain.EventSkillPromoted), proposal, actor, "proposal promoted to skill "+meta.ID); err != nil {
+		return skill.SkillProposal{}, err
+	}
+	if err := s.emitSkillLearningEvent(ctx, sessionID, proposal.SourceRunID, proposal.SourceRunID+":skill_promoted", domain.EventSkillPromoted, skillLearningEventPayload{
+		ProposalID: proposal.ProposalID, SkillID: meta.ID, Status: string(proposal.Status),
+	}); err != nil {
+		return skill.SkillProposal{}, err
+	}
+
+	// Reload the in-memory index so the promoted skill becomes selectable.
+	if s.skills != nil {
+		if err := s.emitSkillLearningEvent(ctx, sessionID, proposal.SourceRunID, proposal.SourceRunID+":skill_index_reload_requested", domain.EventSkillIndexReloadRequested, skillLearningEventPayload{
+			ProposalID: proposal.ProposalID, SkillID: meta.ID,
+		}); err != nil {
+			return skill.SkillProposal{}, err
+		}
+		if err := s.skills.Reload(); err != nil {
+			return proposal, fmt.Errorf("skill promoted but index reload failed: %w", err)
+		}
+		if err := s.emitSkillLearningEvent(ctx, sessionID, proposal.SourceRunID, proposal.SourceRunID+":skill_index_reloaded", domain.EventSkillIndexReloaded, skillLearningEventPayload{
+			ProposalID: proposal.ProposalID, SkillID: meta.ID,
+		}); err != nil {
+			return skill.SkillProposal{}, err
+		}
+	}
+	if err := s.emitSkillLearningEvent(ctx, sessionID, proposal.SourceRunID, proposal.SourceRunID+":skill_audit_promoted", domain.EventSkillAuditRecorded, skillLearningEventPayload{
+		ProposalID: proposal.ProposalID, SkillID: meta.ID, Status: string(proposal.Status), Reason: "promoted",
+	}); err != nil {
+		return skill.SkillProposal{}, err
+	}
+	return proposal, nil
+}
+
+// failPromotion marks an approved proposal as failed and records why. The
+// proposal can be retried later (failed -> promoted is a legal transition).
+func (s *RuntimeService) failPromotion(ctx context.Context, sessionID string, proposal skill.SkillProposal, actor string, cause error) (skill.SkillProposal, error) {
+	proposal.Status = skill.ProposalFailed
+	proposal.UpdatedAt = s.now()
+	if err := s.proposals.Update(proposal); err != nil {
+		return skill.SkillProposal{}, fmt.Errorf("promotion failed (%v) and status update failed: %w", cause, err)
+	}
+	if err := s.appendSkillAudit(string(domain.EventSkillPromotionFailed), proposal, actor, "promotion failed: "+cause.Error()); err != nil {
+		return skill.SkillProposal{}, err
+	}
+	if err := s.emitSkillLearningEvent(ctx, sessionID, proposal.SourceRunID, proposal.SourceRunID+":skill_promotion_failed", domain.EventSkillPromotionFailed, skillLearningEventPayload{
+		ProposalID: proposal.ProposalID, SkillID: proposal.SkillID, Status: string(proposal.Status), Error: cause.Error(),
+	}); err != nil {
+		return skill.SkillProposal{}, err
+	}
+	if err := s.emitSkillLearningEvent(ctx, sessionID, proposal.SourceRunID, proposal.SourceRunID+":skill_audit_promotion_failed", domain.EventSkillAuditRecorded, skillLearningEventPayload{
+		ProposalID: proposal.ProposalID, SkillID: proposal.SkillID, Status: string(proposal.Status), Reason: "promotion_failed",
+	}); err != nil {
+		return skill.SkillProposal{}, err
+	}
+	return proposal, fmt.Errorf("promote proposal %q: %w", proposal.ProposalID, cause)
+}
+
+// rejectSkillProposal rejects a pending proposal, emitting
+// SkillProposalRejected -> SkillAuditRecorded.
+func (s *RuntimeService) rejectSkillProposal(ctx context.Context, proposalID, actor, reason string) (skill.SkillProposal, error) {
+	if s.proposals == nil {
+		return skill.SkillProposal{}, errSkillLearningDisabled
+	}
+	proposal, err := s.proposals.Get(proposalID)
+	if err != nil {
+		return skill.SkillProposal{}, err
+	}
+	run, err := s.store.LoadRun(ctx, proposal.SourceRunID)
+	if err != nil {
+		return skill.SkillProposal{}, fmt.Errorf("load source run: %w", err)
+	}
+	if proposal.Status != skill.ProposalPending {
+		return skill.SkillProposal{}, fmt.Errorf("proposal %q is %s, not pending", proposalID, proposal.Status)
+	}
+
+	now := s.now()
+	proposal.Status = skill.ProposalRejected
+	proposal.RejectedAt = &now
+	proposal.UpdatedAt = now
+	if err := s.proposals.Update(proposal); err != nil {
+		return skill.SkillProposal{}, err
+	}
+	summary := "proposal rejected"
+	if reason != "" {
+		summary += ": " + reason
+	}
+	if err := s.appendSkillAudit(string(domain.EventSkillProposalRejected), proposal, actor, summary); err != nil {
+		return skill.SkillProposal{}, err
+	}
+	if err := s.emitSkillLearningEvent(ctx, run.SessionID, proposal.SourceRunID, proposal.SourceRunID+":skill_proposal_rejected", domain.EventSkillProposalRejected, skillLearningEventPayload{
+		ProposalID: proposal.ProposalID, SkillID: proposal.SkillID, Status: string(proposal.Status), Reason: reason,
+	}); err != nil {
+		return skill.SkillProposal{}, err
+	}
+	if err := s.emitSkillLearningEvent(ctx, run.SessionID, proposal.SourceRunID, proposal.SourceRunID+":skill_audit_rejected", domain.EventSkillAuditRecorded, skillLearningEventPayload{
+		ProposalID: proposal.ProposalID, SkillID: proposal.SkillID, Status: string(proposal.Status), Reason: "rejected",
+	}); err != nil {
+		return skill.SkillProposal{}, err
+	}
+	return proposal, nil
+}
+
+// WebSocket method params for the skill-learning loop. Mutating methods carry
+// the admin token in params.
+type skillProposalListParams struct {
+	Status string `json:"status"`
+}
+
+type skillProposalGetParams struct {
+	ProposalID string `json:"proposal_id"`
+}
+
+type skillProposalCreateParams struct {
+	RunID string `json:"run_id"`
+	Token string `json:"token"`
+}
+
+type skillProposalActionParams struct {
+	ProposalID string `json:"proposal_id"`
+	Reason     string `json:"reason"`
+	Token      string `json:"token"`
+}
+
+func (s *RuntimeService) handleSkillProposalList(_ context.Context, req protocol.ClientRequest) (json.RawMessage, error) {
+	var params skillProposalListParams
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return nil, fmt.Errorf("decode skill.proposal.list params: %w", err)
+		}
+	}
+	payload, err := s.ListSkillProposals(params.Status)
+	if err != nil {
+		return nil, err
+	}
+	return marshalPayload(payload)
+}
+
+func (s *RuntimeService) handleSkillProposalGet(_ context.Context, req protocol.ClientRequest) (json.RawMessage, error) {
+	var params skillProposalGetParams
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return nil, fmt.Errorf("decode skill.proposal.get params: %w", err)
+		}
+	}
+	if params.ProposalID == "" {
+		return nil, fmt.Errorf("proposal_id is required")
+	}
+	detail, found, err := s.GetSkillProposal(params.ProposalID)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, fmt.Errorf("skill proposal %q not found", params.ProposalID)
+	}
+	return marshalPayload(detail)
+}
+
+func (s *RuntimeService) handleSkillProposalCreate(ctx context.Context, req protocol.ClientRequest) (json.RawMessage, error) {
+	var params skillProposalCreateParams
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return nil, fmt.Errorf("decode skill.proposal.create_from_run params: %w", err)
+		}
+	}
+	if err := s.requireAdmin(params.Token); err != nil {
+		return nil, err
+	}
+	if params.RunID == "" {
+		return nil, fmt.Errorf("run_id is required")
+	}
+	detail, err := s.CreateSkillProposal(ctx, params.RunID)
+	if err != nil {
+		return nil, err
+	}
+	return marshalPayload(detail)
+}
+
+func (s *RuntimeService) handleSkillProposalApprove(ctx context.Context, req protocol.ClientRequest) (json.RawMessage, error) {
+	var params skillProposalActionParams
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return nil, fmt.Errorf("decode skill.proposal.approve params: %w", err)
+		}
+	}
+	if err := s.requireAdmin(params.Token); err != nil {
+		return nil, err
+	}
+	if params.ProposalID == "" {
+		return nil, fmt.Errorf("proposal_id is required")
+	}
+	detail, err := s.ApproveSkillProposal(ctx, params.ProposalID)
+	if err != nil {
+		return nil, err
+	}
+	return marshalPayload(detail)
+}
+
+func (s *RuntimeService) handleSkillProposalReject(ctx context.Context, req protocol.ClientRequest) (json.RawMessage, error) {
+	var params skillProposalActionParams
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return nil, fmt.Errorf("decode skill.proposal.reject params: %w", err)
+		}
+	}
+	if err := s.requireAdmin(params.Token); err != nil {
+		return nil, err
+	}
+	if params.ProposalID == "" {
+		return nil, fmt.Errorf("proposal_id is required")
+	}
+	detail, err := s.RejectSkillProposal(ctx, params.ProposalID, params.Reason)
+	if err != nil {
+		return nil, err
+	}
+	return marshalPayload(detail)
 }
