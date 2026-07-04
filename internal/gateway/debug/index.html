@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Orbis Runtime Debug</title>
+    <link rel="stylesheet" href="/debug/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="header" aria-labelledby="title">
+        <div>
+          <p class="eyebrow">Orbis Agent Runtime</p>
+          <h1 id="title">Runtime Debug View</h1>
+        </div>
+        <div class="status-strip" aria-live="polite">
+          <span id="socketState" class="pill state-idle">disconnected</span>
+          <span id="runState" class="pill">no run</span>
+        </div>
+      </section>
+
+      <section class="control-panel" aria-label="Prompt controls">
+        <label class="field">
+          <span>Session</span>
+          <input id="sessionId" autocomplete="off" spellcheck="false">
+        </label>
+        <label class="field prompt-field">
+          <span>Prompt</span>
+          <textarea id="promptText" rows="4" spellcheck="false">안녕. Orbis 런타임 내부 흐름을 짧게 설명해줘.</textarea>
+        </label>
+        <div class="actions">
+          <button id="connectBtn" type="button">Connect</button>
+          <button id="sendBtn" type="button" disabled>Send prompt</button>
+          <button id="statusBtn" type="button" disabled>Run status</button>
+          <button id="cancelBtn" type="button" disabled>Cancel run</button>
+          <button id="clearBtn" type="button">Clear</button>
+        </div>
+      </section>
+
+      <section class="flow" aria-label="Runtime stages">
+        <div class="stage" data-stage="gateway">
+          <span>Gateway</span>
+          <strong id="gatewayCount">0</strong>
+        </div>
+        <div class="stage" data-stage="queue">
+          <span>Queue</span>
+          <strong id="queueCount">0</strong>
+        </div>
+        <div class="stage" data-stage="reducer">
+          <span>Reducer</span>
+          <strong id="reducerCount">0</strong>
+        </div>
+        <div class="stage" data-stage="worker">
+          <span>Worker</span>
+          <strong id="workerCount">0</strong>
+        </div>
+        <div class="stage" data-stage="terminal">
+          <span>Terminal</span>
+          <strong id="terminalCount">0</strong>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <div class="panel timeline-panel">
+          <div class="panel-head">
+            <h2>Event timeline</h2>
+            <span id="eventCount">0 events</span>
+          </div>
+          <ol id="events" class="events" aria-live="polite"></ol>
+        </div>
+
+        <div class="panel detail-panel">
+          <div class="panel-head">
+            <h2>Details</h2>
+            <span id="selectedEvent">none</span>
+          </div>
+          <dl class="meta">
+            <div><dt>run_id</dt><dd id="runId">-</dd></div>
+            <div><dt>session_id</dt><dd id="currentSession">-</dd></div>
+            <div><dt>last ack</dt><dd id="lastAck">-</dd></div>
+          </dl>
+          <h3>Final answer</h3>
+          <pre id="finalAnswer" class="answer">-</pre>
+          <h3>Payload</h3>
+          <pre id="payload" class="payload">{}</pre>
+        </div>
+      </section>
+    </main>
+
+    <script src="/debug/app.js"></script>
+  </body>
+</html>

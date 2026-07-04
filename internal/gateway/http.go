@@ -117,6 +117,8 @@ func NewHTTPHandler(runtime Runtime, opts ...HandlerOption) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
 	})
+	mux.HandleFunc("GET /debug", handleDebug)
+	mux.HandleFunc("GET /debug/", handleDebug)
 	mux.HandleFunc("GET /ws", func(w http.ResponseWriter, r *http.Request) {
 		handleWebSocket(w, r, runtime, cfg.broker, cfg.readTimeout)
 	})
