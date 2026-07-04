@@ -166,5 +166,56 @@ tests. See `history.md` for the v1.5 completion record.
 
 - post-hoc real-LLM smoke of denial-continuation / tool-aware selection once
   `:8080` is free.
-- v2: auto skill creation, learning loop, vector search, subagents, MCP,
-  `reload` auth separation.
+- done: v2 learning loop + reload auth (below). Remaining v3 candidates:
+  vector search, subagents, MCP.
+
+## v2: Reviewable Skill Learning Loop
+
+The runtime derives Skill Proposals from completed runs; a human must approve a
+proposal before it is promoted to an active skill. `SkillProposalCreated !=
+SkillPromoted` is enforced structurally (no pending→promoted transition). The
+whole loop lives in the app layer — the reducer stays pure.
+
+- `internal/skill`: `SkillProposal` + lifecycle (`CanTransition`),
+  `ProposalStore` (`data/skill_proposals/{pending,approved,rejected}`, bucket
+  moves enforce transitions), JSONL `AuditLog`, versioning
+  (shared `contentHash`, reject-on-conflict), deterministic detector
+  (`BuildRunFacts`/`DetectCandidate`) and renderer (`NewProposalFromRun`),
+  `Promoter` (md + index entry with version/`learned` tag/priority 50/
+  provenance; bootstraps a missing index).
+- `internal/app/skill_learning.go`: create-from-run (events Candidate/Created/
+  ReviewRequired + audit), approve→promote→auto-reload (Approved/Promoted/
+  IndexReloadRequested/IndexReloaded/AuditRecorded; conflict ⇒ failed +
+  PromotionFailed), reject (Rejected/AuditRecorded), `requireAdmin`, WS
+  handlers; optional create-only auto-propose hook (`ORBIS_SKILL_AUTO_PROPOSE`,
+  default false).
+- APIs (one impl, two surfaces): WS `skill.proposal.list/get/create_from_run/
+  approve/reject`; HTTP `GET /skill-proposals(?status=)`,
+  `GET /skill-proposals/{id}`, `POST /runs/{runID}/skill-proposals`,
+  `POST /skill-proposals/{id}/approve|reject`. Admin gate: no token ⇒ mutating
+  disabled (403); wrong ⇒ 401; reads open. v1 `skills reload` (HTTP+WS) is now
+  admin-gated too.
+- Specs: `.spec/v2-skill-learning-loop.md`,
+  `decisions/v2-skill-learning-decisions.md`, `docs/skill-learning.md`.
+  Config: `ORBIS_SKILL_LEARNING_ENABLED/PROPOSALS_DIR/AUDIT_PATH`,
+  `ORBIS_ADMIN_TOKEN`, `ORBIS_SKILL_AUTO_PROPOSE`.
+- PRs: #33 (foundation), #34 (creation/detection), #35 (review/promotion/APIs),
+  #36 (docs).
+
+## v2 Status
+
+Completed on 2026-07-04 (PRs #33–#36 merged to `main`).
+
+Fresh verification per PR: `gofmt -l .`, `go vet ./...`, `go test ./...`,
+`go test -race ./...`, `git diff --check`. Real-LLM manual acceptance on an
+isolated port: tool run → create proposal → 401 auth matrix → approve →
+promoted v1 → audit trail (3 records), index 3 seeds + 1 learned, reloaded
+catalog serves 4 skills; the learned skill is selectable via tool-availability
+scoring (unit-tested).
+
+## Post-v2 Follow-ups
+
+- v2.1: multi-version promotion; reviewer edits before approval;
+  session-independent reload events.
+- real auth to replace the static admin token.
+- v3 candidates: vector search, subagents, MCP.
