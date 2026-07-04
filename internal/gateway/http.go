@@ -28,11 +28,24 @@ type Skills interface {
 	ReloadSkills() error
 }
 
+// SkillLearning exposes the reviewable skill-proposal loop (v2) over HTTP. It
+// returns wire DTOs; the gateway never touches the skill package. Mutating
+// operations are only reachable through the admin gate.
+type SkillLearning interface {
+	ListSkillProposals(status string) (protocol.SkillProposalListPayload, error)
+	GetSkillProposal(id string) (protocol.SkillProposalDetailPayload, bool, error)
+	CreateSkillProposal(ctx context.Context, runID string) (protocol.SkillProposalDetailPayload, error)
+	ApproveSkillProposal(ctx context.Context, id string) (protocol.SkillProposalDetailPayload, error)
+	RejectSkillProposal(ctx context.Context, id, reason string) (protocol.SkillProposalDetailPayload, error)
+}
+
 type HandlerOption func(*handlerConfig)
 
 type handlerConfig struct {
 	broker      Broker
 	skills      Skills
+	learning    SkillLearning
+	adminToken  string
 	readTimeout time.Duration
 }
 
@@ -49,6 +62,37 @@ func WithSkills(skills Skills) HandlerOption {
 	return func(cfg *handlerConfig) {
 		cfg.skills = skills
 	}
+}
+
+// WithSkillLearning registers the skill-proposal review endpoints. Omitting it
+// leaves those routes unregistered so they 404.
+func WithSkillLearning(learning SkillLearning) HandlerOption {
+	return func(cfg *handlerConfig) {
+		cfg.learning = learning
+	}
+}
+
+// WithAdmin sets the bearer token that guards mutating skill endpoints
+// (proposal create/approve/reject and skills reload). An empty token — the
+// default — disables those endpoints entirely instead of leaving them open.
+func WithAdmin(token string) HandlerOption {
+	return func(cfg *handlerConfig) {
+		cfg.adminToken = token
+	}
+}
+
+// requireAdmin gates a mutating endpoint: 403 when no token is configured
+// (endpoint disabled), 401 on a bearer mismatch.
+func requireAdmin(w http.ResponseWriter, r *http.Request, token string) bool {
+	if token == "" {
+		http.Error(w, "admin endpoints are disabled: no admin token configured", http.StatusForbidden)
+		return false
+	}
+	if r.Header.Get("Authorization") != "Bearer "+token {
+		http.Error(w, "invalid admin token", http.StatusUnauthorized)
+		return false
+	}
+	return true
 }
 
 // WithReadTimeout bounds how long a single WebSocket read may block. Zero (the
@@ -89,11 +133,73 @@ func NewHTTPHandler(runtime Runtime, opts ...HandlerOption) http.Handler {
 			writeJSON(w, http.StatusOK, detail)
 		})
 		mux.HandleFunc("POST /skills/reload", func(w http.ResponseWriter, r *http.Request) {
+			if !requireAdmin(w, r, cfg.adminToken) {
+				return
+			}
 			if err := cfg.skills.ReloadSkills(); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
 			writeJSON(w, http.StatusOK, protocol.SkillReloadPayload{Count: len(cfg.skills.ListSkills().Skills)})
+		})
+	}
+	if cfg.learning != nil {
+		mux.HandleFunc("GET /skill-proposals", func(w http.ResponseWriter, r *http.Request) {
+			payload, err := cfg.learning.ListSkillProposals(r.URL.Query().Get("status"))
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, http.StatusOK, payload)
+		})
+		mux.HandleFunc("GET /skill-proposals/{proposalID}", func(w http.ResponseWriter, r *http.Request) {
+			detail, found, err := cfg.learning.GetSkillProposal(r.PathValue("proposalID"))
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if !found {
+				http.Error(w, "skill proposal not found", http.StatusNotFound)
+				return
+			}
+			writeJSON(w, http.StatusOK, detail)
+		})
+		mux.HandleFunc("POST /runs/{runID}/skill-proposals", func(w http.ResponseWriter, r *http.Request) {
+			if !requireAdmin(w, r, cfg.adminToken) {
+				return
+			}
+			detail, err := cfg.learning.CreateSkillProposal(r.Context(), r.PathValue("runID"))
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, http.StatusCreated, detail)
+		})
+		mux.HandleFunc("POST /skill-proposals/{proposalID}/approve", func(w http.ResponseWriter, r *http.Request) {
+			if !requireAdmin(w, r, cfg.adminToken) {
+				return
+			}
+			detail, err := cfg.learning.ApproveSkillProposal(r.Context(), r.PathValue("proposalID"))
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, http.StatusOK, detail)
+		})
+		mux.HandleFunc("POST /skill-proposals/{proposalID}/reject", func(w http.ResponseWriter, r *http.Request) {
+			if !requireAdmin(w, r, cfg.adminToken) {
+				return
+			}
+			var body struct {
+				Reason string `json:"reason"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			detail, err := cfg.learning.RejectSkillProposal(r.Context(), r.PathValue("proposalID"), body.Reason)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, http.StatusOK, detail)
 		})
 	}
 	return mux
