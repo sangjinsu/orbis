@@ -135,18 +135,23 @@ HTTP endpoints (registered only when skills are enabled):
 
 ## Seed skills
 
-`data/skills/` ships three skills, ordered by priority:
+`data/skills/` ships eight skills, ordered by priority:
 
 - `websocket-runtime-test` (100) — how to test the runtime over WebSocket.
 - `tool-calling-policy` (90) — the tool-calling policy and safe defaults.
 - `go-reducer-pattern` (80) — how to implement a pure reducer.
+- `web-search` (70) — how to plan safe web searches for current facts.
+- `docs-lookup` (68) — how to verify SDK/API/CLI behavior against official docs.
+- `github-search` (66) — how to search GitHub issues, PRs, releases, and history.
+- `runtime-debug` (64) — how to debug Orbis event flow through `/debug` and streams.
+- `test-plan` (62) — how to define verification and smoke-test steps.
 
 ## Limits (v1)
 
 - A `reload` during an in-flight run does not change that run's already-selected
   skills (the run keeps its snapshot; `content_hash` is the drift record).
 - Selection is substring-based; there is no embedding/vector search.
-- `SelectionInput.ToolNames` is reserved and unused by the v1 scorer.
+- `SelectionInput.ToolNames` can boost skills whose `related_tools` are enabled.
 - Skills are never created or edited by the runtime.
 
 ## Non-goals / follow-ups
@@ -165,5 +170,6 @@ go run ./cmd/orbis ws smoke skill   # drives a skill-selecting prompt via the re
 
 Or connect with `wscat -c ws://localhost:8080/ws` and send a `session.message`
 whose text induces a skill, e.g. "WebSocket으로 Orbis 런타임 테스트 방법 알려줘"
-(selects `websocket-runtime-test`). Inspect the catalog with
+(selects `websocket-runtime-test`) or "Use web_search to check the latest
+release details" (selects `web-search`). Inspect the catalog with
 `curl localhost:8080/skills` and `curl localhost:8080/skills/{id}`.

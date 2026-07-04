@@ -257,8 +257,8 @@ func TestSeedSkillsSelectExpected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore(seed) error = %v", err)
 	}
-	if len(store.Snapshot()) != 3 {
-		t.Fatalf("seed skills = %d, want 3", len(store.Snapshot()))
+	if len(store.Snapshot()) != 8 {
+		t.Fatalf("seed skills = %d, want 8", len(store.Snapshot()))
 	}
 
 	tests := []struct {
@@ -269,6 +269,11 @@ func TestSeedSkillsSelectExpected(t *testing.T) {
 		{"websocket", "WebSocket으로 Orbis 런타임 테스트 방법 알려줘", "websocket-runtime-test"},
 		{"tool", "tool calling 정책에 맞게 math.add를 호출해줘", "tool-calling-policy"},
 		{"reducer", "reducer를 어떻게 구현해야 해?", "go-reducer-pattern"},
+		{"web search", "Use web_search to check the latest release details", "web-search"},
+		{"docs lookup", "Check the official docs for this SDK configuration", "docs-lookup"},
+		{"github search", "Search GitHub pull request history for this repository", "github-search"},
+		{"runtime debug", "Use /debug to inspect the runtime event flow", "runtime-debug"},
+		{"test plan", "Create a smoke test and acceptance test plan", "test-plan"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
