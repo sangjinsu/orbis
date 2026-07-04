@@ -287,5 +287,85 @@ real-LLM paths were confirmed at v1 (#27, #29).
 ### Follow-ups
 
 - [ ] Post-hoc real-LLM smoke of B/C once `:8080` is free.
-- [ ] v2: auto skill creation, learning loop, vector search, subagents, MCP,
-  `reload` auth separation.
+- [x] v2 learning loop + reload auth — delivered (see the v2 record below).
+- [ ] v3 candidates: vector search, subagents, MCP.
+
+## 2026-07-04: Orbis v2 Reviewable Skill Learning Loop Completed
+
+Status: completed (merged to `main`; unit/race verified; real-LLM manual
+acceptance passed on an isolated port)
+
+### Summary
+
+v2 lets the runtime learn skills from completed runs **without ever
+self-modifying unreviewed**: it derives deterministic Skill Proposals from run
+data, a human approves or rejects them over admin-guarded APIs, and only an
+explicit approval promotes a proposal into `data/skills/` (with provenance, an
+audit trail, and an automatic index reload). The core invariant
+`SkillProposalCreated != SkillPromoted` is enforced structurally — the proposal
+lifecycle has no pending→promoted transition. The whole loop lives in the app
+layer, so the reducer stays pure.
+
+### Completed Scope
+
+- PR #33 — proposal foundation: `SkillProposal` model + lifecycle
+  (`CanTransition`), file `ProposalStore` under
+  `data/skill_proposals/{pending,approved,rejected}` (bucket moves enforce
+  legal transitions), JSONL `AuditLog` (`data/audit/skill_audit.jsonl`),
+  versioning helpers (shared `contentHash`, reject-on-conflict), ten v2 event
+  constants, `ORBIS_SKILL_LEARNING_ENABLED` / `ORBIS_SKILL_PROPOSALS_DIR` /
+  `ORBIS_SKILL_AUDIT_PATH` / `ORBIS_ADMIN_TOKEN` (empty default) /
+  `ORBIS_SKILL_AUTO_PROPOSE` (false default).
+- PR #34 — proposal creation: deterministic `BuildRunFacts`/`DetectCandidate`
+  (completed run + tools|skills|recovered-failure|repeated-procedure|explicit
+  request; no LLM), deterministic `NewProposalFromRun` markdown rendering
+  (ASCII slug ids, concise rationale, never hidden reasoning),
+  `CreateSkillProposalFromRun` emitting SkillCandidateDetected →
+  SkillProposalCreated → SkillReviewRequired plus an audit record, optional
+  create-only auto-propose hook on RunCompleted.
+- PR #35 — review + promotion: `Promoter` writes `data/skills/{id}.md` +
+  `index.json` entries (version 1, `learned` tag, priority 50 below seeds,
+  source proposal/run provenance), approve flow approve→promote→auto-reload
+  with SkillProposalApproved → SkillPromoted → SkillIndexReloadRequested →
+  SkillIndexReloaded → SkillAuditRecorded (conflict ⇒ proposal `failed` +
+  SkillPromotionFailed), reject flow, WS
+  `skill.proposal.list/get/create_from_run/approve/reject` + HTTP
+  `GET /skill-proposals(?status=)`, `GET /skill-proposals/{id}`,
+  `POST /runs/{runID}/skill-proposals`, `POST
+  /skill-proposals/{id}/approve|reject`, and the admin gate (no token ⇒
+  mutating endpoints disabled; wrong token ⇒ 401; reads open; the previously
+  open v1 skills reload is now behind the same gate).
+- PR #36 — docs: `docs/skill-learning.md`,
+  `.workspace/.spec/v2-skill-learning-loop.md`,
+  `.workspace/decisions/v2-skill-learning-decisions.md`, README v2 sections,
+  and this record.
+
+### Verification Evidence
+
+Fresh branch verification on every PR:
+
+```bash
+gofmt -l .
+go vet ./...
+go test ./...
+go test -race ./...
+git diff --check
+```
+
+Real-LLM manual acceptance (isolated `:18080` because `:8080` is externally
+held): `orbis ws smoke tool` → RunCompleted (used tools + skills) →
+`POST /runs/run_smoke_msg/skill-proposals` (Bearer) → pending proposal with
+detection rationale → approve without/with wrong token → 401 → approve with the
+admin token → `promoted` v1 → `data/skill_proposals/approved/` 1 file, audit
+JSONL 3 records (created/approved/promoted), `data/skills/index.json` gained
+the learned skill (3 seeds + 1), and the reloaded `GET /skills` catalog served
+all 4. Unit tests additionally prove the promoted skill is selectable via
+tool-availability scoring.
+
+### Follow-ups
+
+- v2.1: multi-version promotion for existing skill ids; reviewer edits before
+  approval; session-independent reload events.
+- Replace the static admin token with real auth when the gateway grows
+  authentication.
+- v3 candidates: vector search, subagents, MCP.

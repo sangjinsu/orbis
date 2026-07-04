@@ -7,7 +7,8 @@ observability, and WebSocket progress streaming. The LLM is a worker inside the
 loop, not the loop controller.
 
 > Design source of truth: [`AGENTS.md`](AGENTS.md). Feature docs:
-> [`docs/tool-calling.md`](docs/tool-calling.md), [`docs/skills.md`](docs/skills.md).
+> [`docs/tool-calling.md`](docs/tool-calling.md), [`docs/skills.md`](docs/skills.md),
+> [`docs/skill-learning.md`](docs/skill-learning.md).
 
 ## Architecture
 
@@ -75,11 +76,13 @@ One deployable Go process (modular monolith). Responsibilities:
 - **v0.2 tool calling** — the LLM only *proposes* a tool call; the runtime validates (toolsets + ordered policy), authorizes, dispatches, executes (Tool Worker), observes, and persists it, with idempotent dedup, visible retry/backoff, timeout, and deny-by-default dangerous tools. See [`docs/tool-calling.md`](docs/tool-calling.md).
 - **v1 skills** — reusable procedural knowledge, selected deterministically (no LLM) and injected as an `<orbis_skills>` instructions block before planning; lifecycle events, per-run snapshot, and a read-only skill API (WS + HTTP). See [`docs/skills.md`](docs/skills.md).
 - **v1.5** — graceful server shutdown; agentic continuation after a tool-policy denial (bounded per run); tool-aware skill scoring (enabled tools boost related skills).
+- **v2 skill learning** — a reviewable learning loop: the runtime derives **Skill Proposals** from completed runs (deterministic, no LLM), a human approves or rejects them over admin-guarded APIs, and only approval promotes a proposal into `data/skills/` (with provenance, versioning, an audit trail, and an automatic index reload). Nothing is promoted automatically. See [`docs/skill-learning.md`](docs/skill-learning.md).
 
-### Tools vs Skills
+### Tools vs Skills vs Proposals
 
 - **Tool** = runtime-controlled side-effect execution. The LLM proposes; only the Tool Worker runs it.
 - **Skill** = reusable procedural knowledge for planning and tool use. It never executes a side effect; it is loaded into the LLM context before planning.
+- **Skill Proposal** = a reviewable candidate skill derived from a run. It is *not* an active skill until a human approves it (`SkillProposalCreated != SkillPromoted`).
 
 ## Quick Start
 
@@ -146,23 +149,40 @@ Connect to `ws://localhost:8080/ws` and send request envelopes:
 {"type":"req","id":"cancel_1","method":"run.cancel","params":{"run_id":"run_msg_1"}}
 ```
 
-Skill inspection methods (read-only; never execute a skill):
+Skill inspection methods (read-only; never execute a skill). `skill.reload` is
+mutating and requires the admin token as of v2:
 
 ```json
 {"type":"req","id":"sk_1","method":"skill.list"}
 {"type":"req","id":"sk_2","method":"skill.get","params":{"skill_id":"websocket-runtime-test"}}
-{"type":"req","id":"sk_3","method":"skill.reload"}
+{"type":"req","id":"sk_3","method":"skill.reload","params":{"token":"dev-orbis-admin"}}
 ```
 
-HTTP endpoints:
+Skill-learning methods (v2). Mutating methods carry the admin token in params:
+
+```json
+{"type":"req","id":"sp_1","method":"skill.proposal.list","params":{"status":"pending"}}
+{"type":"req","id":"sp_2","method":"skill.proposal.get","params":{"proposal_id":"prop_run_1"}}
+{"type":"req","id":"sp_3","method":"skill.proposal.create_from_run","params":{"run_id":"run_1","token":"dev-orbis-admin"}}
+{"type":"req","id":"sp_4","method":"skill.proposal.approve","params":{"proposal_id":"prop_run_1","token":"dev-orbis-admin"}}
+{"type":"req","id":"sp_5","method":"skill.proposal.reject","params":{"proposal_id":"prop_run_1","reason":"too narrow","token":"dev-orbis-admin"}}
+```
+
+HTTP endpoints (admin-gated routes take `Authorization: Bearer <ORBIS_ADMIN_TOKEN>`;
+with no token configured they are disabled entirely):
 
 ```text
 GET  /healthz
 GET  /readyz
-GET  /ws                     # upgrades to WebSocket
-GET  /skills                 # skill catalog (when skills enabled)
-GET  /skills/{skillID}       # one skill (metadata + body), 404 if unknown
-POST /skills/reload          # reload the skill index from disk
+GET  /ws                                    # upgrades to WebSocket
+GET  /skills                                # skill catalog (when skills enabled)
+GET  /skills/{skillID}                      # one skill (metadata + body), 404 if unknown
+POST /skills/reload                         # reload the skill index (admin)
+GET  /skill-proposals?status=pending        # review queue (when learning enabled)
+GET  /skill-proposals/{proposalID}          # one proposal incl. body, 404 if unknown
+POST /runs/{runID}/skill-proposals          # create a proposal from a run (admin)
+POST /skill-proposals/{proposalID}/approve  # approve + promote + reload (admin)
+POST /skill-proposals/{proposalID}/reject   # reject, body {"reason":"..."} (admin)
 ```
 
 ## Configuration
@@ -173,6 +193,7 @@ hard-coded. Groups:
 - **Core** — `ORBIS_ADDR`, `ORBIS_DATA_DIR`, `ORBIS_LLM_PROVIDER`, `ORBIS_LLM_MODEL`, `ORBIS_RUN_TIMEOUT`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`.
 - **Tools** — `ORBIS_TOOLSETS` (default `safe`), `ORBIS_TOOL_TIMEOUT_*`, `ORBIS_TOOL_RETRY_*`, `ORBIS_TOOL_DENIAL_CONTINUATION_MAX` (default 2; 0 fails the run on denial).
 - **Skills** — `ORBIS_SKILLS_ENABLED` (default true), `ORBIS_SKILLS_DIR`, `ORBIS_SKILLS_MAX_SELECTED`, `ORBIS_SKILLS_MAX_CHARS`, `ORBIS_SKILLS_RELOAD_ON_START`.
+- **Skill learning** — `ORBIS_SKILL_LEARNING_ENABLED` (default true), `ORBIS_SKILL_PROPOSALS_DIR`, `ORBIS_SKILL_AUDIT_PATH`, `ORBIS_ADMIN_TOKEN` (default empty = mutating endpoints disabled), `ORBIS_SKILL_AUTO_PROPOSE` (default false; creates pending proposals only, never promotes).
 - **WebSocket** — `ORBIS_WS_READ_TIMEOUT` (default 0 = disabled).
 
 ## Persistence
@@ -184,7 +205,9 @@ data/events/{session_id}.jsonl   # append-only event log (replayable)
 data/sessions/{session_id}.json  # latest session snapshot
 data/runs/{run_id}.json          # latest run snapshot (incl. selected skills)
 data/tool_calls/{key}.json       # tool-call idempotency records
-data/skills/                     # committed seed skills (index.json + bodies)
+data/skills/                     # committed seed skills + promoted learned skills
+data/skill_proposals/            # review queue: pending/ approved/ rejected/
+data/audit/skill_audit.jsonl     # skill-learning audit trail
 ```
 
 ## Development
