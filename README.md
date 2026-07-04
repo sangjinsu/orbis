@@ -1,146 +1,85 @@
 # Orbis Agent Runtime
 
-Orbis is a Go-based, event-loop-first runtime for long-running AI agents.
-
-The runtime owns session state, event ordering, action dispatch, cancellation,
-observability, and WebSocket progress streaming. The LLM is a worker inside the
-loop, not the loop controller.
-
-> Design source of truth: [`AGENTS.md`](AGENTS.md). Feature docs:
-> [`docs/tool-calling.md`](docs/tool-calling.md), [`docs/skills.md`](docs/skills.md),
-> [`docs/skill-learning.md`](docs/skill-learning.md).
-
-## Architecture
-
-The core rule is `Event + Current State => New State + Actions`. A reducer
-decides state transitions; workers execute side effects and return new events;
-WebSocket clients observe progress through an event stream.
+Orbis는 장시간 실행되는 AI agent를 위한 Go 기반 runtime입니다. 핵심 목표는
+LLM이 직접 loop를 제어하지 않고, runtime이 event ordering, state transition,
+action dispatch, cancellation, timeout, persistence, WebSocket streaming을
+소유하게 만드는 것입니다.
 
 ```text
-WebSocket client
-  └─ session.message  ──▶ validate → Event → enqueue → immediate ACK
-                          │
-                          ▼
-              per-session event queue        (ordering)
-                          │
-                          ▼
-                    Session Lane             (one session mutated at a time)
-                          │
-                          ▼
-                     Reducer (pure)          → NextState + Actions + derived Events
-                          │
-                          ▼
-                    Dispatcher               (worker boundary)
-        DispatchLLMCall · DispatchToolCall · ScheduleTimer · EmitFinalAnswer
-                          │
-                          ▼
-             Workers: LLM · Tool · Timer     → result Events
-                          │
-                          ▼
-        Session Lane ─▶ Broker ─▶ WebSocket event stream
+Event + Current State => New State + Actions
 ```
 
-### System composition
+LLM은 loop 자체가 아니라 worker 중 하나입니다.
 
-The full system — the runtime loop, the skill subsystem, and the v2 reviewable
-learning loop — in one picture (rendered by GitHub via Mermaid):
+![Orbis runtime loop](docs/assets/orbis-runtime-loop.gif)
+
+## 현재 상태
+
+- v0.1 runtime kernel: session lane, reducer, dispatcher, worker, broker, JSONL persistence
+- v0.2 tool calling: mock tool registry, policy, idempotency, retry, timeout, result events
+- v1 skills: run 시작 시 procedural knowledge를 선택해 LLM context에 주입
+- v2 skill learning: run으로부터 reviewable proposal을 만들고, admin 승인 후 seed skill로 promotion
+- `/debug`: 실제 WebSocket event stream을 그래픽으로 확인하는 runtime visualizer
+
+## 아키텍처
+
+Orbis는 v0.x에서 modular monolith로 유지합니다. 하나의 Go process 안에서 package
+boundary를 분리하고, 외부 broker나 microservice는 아직 도입하지 않습니다.
 
 ```mermaid
-flowchart TB
-    subgraph CLIENTS["Clients"]
-        WSC["WebSocket client"]
-        ADM["HTTP client / reviewer"]
-    end
+flowchart LR
+    Client["WebSocket / HTTP Client"]
+    Gateway["gateway<br/>HTTP + WebSocket"]
+    Queue["event queue"]
+    Lane["session lane<br/>ordered per session"]
+    Reducer["pure reducer"]
+    Dispatcher["action dispatcher"]
+    Workers["worker pool<br/>LLM / Tool / Timer"]
+    Broker["event broker"]
+    Store["file store<br/>JSONL + snapshots"]
 
-    subgraph GW["internal/gateway"]
-        WSEP["GET /ws<br/>session.* · run.* · events.list · skill.*"]
-        REST["REST<br/>/skills · /skill-proposals · /runs/{runID}/skill-proposals"]
-        GATE{"admin gate<br/>Bearer ORBIS_ADMIN_TOKEN"}
-    end
-
-    subgraph APP["internal/app — RuntimeService"]
-        Q["per-session event queue"]
-        LANE["session lane<br/>(one session mutated at a time)"]
-        RED["reducer (pure)<br/>state + event → state' + actions<br/>+ deterministic skill selection"]
-        DISP["dispatcher<br/>injects the orbis_skills block"]
-        LEARN["skill-learning service<br/>propose · approve · promote · audit"]
-    end
-
-    subgraph WK["internal/worker"]
-        LLM["LLM provider<br/>(OpenAI-compatible)"]
-        TW["tool worker<br/>policy · dedup · timeout · retry"]
-        TMR["timer"]
-    end
-
-    subgraph SK["internal/skill"]
-        SSTORE["skill store<br/>(in-memory index + bodies)"]
-        PSTORE["proposal store"]
-        PROM["promoter"]
-        ALOG["audit log"]
-    end
-
-    subgraph DATA["data/ (file persistence)"]
-        DEV["events/*.jsonl"]
-        DSNAP["sessions/ · runs/"]
-        DTC["tool_calls/"]
-        DSK["skills/"]
-        DSP["skill_proposals/"]
-        DAU["audit/skill_audit.jsonl"]
-    end
-
-    BR["internal/broker<br/>(event stream)"]
-
-    WSC -->|"req → immediate ACK"| WSEP --> Q
-    ADM --> REST
-    REST -->|"reads"| LEARN
-    REST -->|"mutations"| GATE --> LEARN
-
-    Q -->|"publish"| BR -->|"progress events"| WSC
-    Q --> LANE --> RED -->|"actions"| DISP
-    RED -.->|"Snapshot()"| SSTORE
-    DISP -.->|"Body(id)"| SSTORE
-    DISP --> LLM
-    DISP --> TW
-    DISP --> TMR
-    LLM -->|"result events"| Q
-    TW -->|"result events"| Q
-    TMR -->|"TimerFired"| Q
-
-    LANE --> DEV
-    LANE --> DSNAP
-    TW --> DTC
-    SSTORE --- DSK
-
-    LEARN --> PSTORE --> DSP
-    LEARN --> PROM -->|"write skill + index"| DSK
-    PROM -.->|"reload"| SSTORE
-    LEARN --> ALOG --> DAU
-    LEARN -->|"lifecycle events"| Q
+    Client --> Gateway
+    Gateway --> Queue
+    Queue --> Lane
+    Lane --> Reducer
+    Reducer --> Dispatcher
+    Dispatcher --> Workers
+    Workers --> Queue
+    Lane --> Store
+    Lane --> Broker
+    Broker --> Client
 ```
 
-Reading the picture through the invariants: everything enters as an **event**
-through the per-session queue; the **lane** serializes state mutation; the
-**reducer** is pure (its only skill interaction is an in-memory snapshot read);
-**workers** own every side effect and answer with new events; the **broker**
-streams progress to subscribers; and the v2 **learning loop** lives entirely in
-the app layer — it can only create proposals, and only an admin-gated approval
-promotes one into `data/skills/` (followed by an index reload).
+패키지 책임은 다음처럼 나뉩니다.
 
-### Prompt lifecycle
+| Package | Responsibility |
+| --- | --- |
+| `cmd/orbis` | CLI entrypoint: `serve`, `ws smoke [tool\|skill]` |
+| `internal/app` | runtime service 조립과 WebSocket method 처리 |
+| `internal/domain` | event, action, run, session 등 안정적인 domain type |
+| `internal/runtime` | reducer, dispatcher, session lane, loop coordination |
+| `internal/worker` | LLM, tool, timer side effect 실행 |
+| `internal/gateway` | HTTP/WebSocket boundary와 `/debug` visualizer |
+| `internal/broker` | session subscriber에게 runtime event broadcast |
+| `internal/store` | JSONL event log와 session/run snapshot 저장 |
+| `internal/skill` | skill index, selection, context injection, proposal promotion |
+| `internal/tool` | tool schema, registry, policy, idempotency |
 
-When a user enters a prompt, the WebSocket handler only validates the request,
-persists the initial run/session records, enqueues a runtime event, and returns
-an ACK. The LLM call happens later through the dispatcher and worker boundary.
+## Prompt Lifecycle
+
+사용자가 prompt를 입력하면 WebSocket handler는 LLM을 직접 호출하지 않습니다. 요청을
+검증하고 `UserMessageReceived` event로 변환한 뒤 queue에 넣고 즉시 ACK를 반환합니다.
+그 이후 runtime loop가 event를 처리합니다.
 
 ```mermaid
 sequenceDiagram
     participant User
     participant WS as GET /ws
-    participant Queue as per-session queue
+    participant Queue as Event Queue
     participant Lane as Session Lane
     participant Reducer
     participant Dispatcher
-    participant LLM as LLM Worker
+    participant Worker as LLM/Tool Worker
     participant Broker
 
     User->>WS: session.subscribe(session_id)
@@ -148,26 +87,24 @@ sequenceDiagram
     User->>WS: session.message(text)
     WS->>Queue: UserMessageReceived
     WS-->>User: ACK {session_id, run_id}
-    Queue->>Broker: publish UserMessageReceived
     Queue->>Lane: ordered event
     Lane->>Reducer: state + event
-    Reducer-->>Lane: next state + DispatchLLMCall
-    Lane->>Dispatcher: action
-    Dispatcher->>Broker: LLMCallStarted
-    Dispatcher->>LLM: Complete/Stream
-    LLM-->>Dispatcher: AssistantDelta / final / tool call
-    Dispatcher->>Queue: LLMResponseReceived or FinalAnswerEmitted
-    Queue->>Broker: runtime events
+    Reducer-->>Lane: next state + actions
+    Lane->>Dispatcher: DispatchLLMCall / DispatchToolCall
+    Dispatcher->>Worker: side effect
+    Worker-->>Queue: result event
+    Queue->>Lane: ordered result
+    Lane->>Broker: publish runtime event
     Broker-->>User: event stream
 ```
 
-Important event sequence for a normal prompt:
+일반 prompt에서 기대할 수 있는 event 흐름은 다음과 같습니다.
 
 ```text
 UserMessageReceived
 RunStarted
 RunStatusChanged
-SkillSelected / SkillLoaded / SkillApplied, if a skill matches
+SkillSelected / SkillLoaded / SkillApplied, if matched
 LLMCallStarted
 AssistantDelta, optional
 LLMResponseReceived
@@ -175,127 +112,150 @@ FinalAnswerEmitted
 RunCompleted
 ```
 
-### Package layout
+tool call prompt에서는 중간에 `ToolCallStarted`, `ToolCallSucceeded`,
+`ToolCallFailed`, `ToolCallTimedOut`, `ToolCallRejected` 같은 event가 추가됩니다.
 
-One deployable Go process (modular monolith). Responsibilities:
+## Runtime Invariants
 
-| Package | Responsibility |
-| --- | --- |
-| `cmd/orbis` | CLI entrypoint: `serve`, `ws smoke [tool\|skill]` |
-| `internal/app` | Runtime service wiring, HTTP server construction, graceful shutdown (`RuntimeService.Close`) |
-| `internal/domain` | Stable core types: `Event`, `Action`, `SessionState`, `RunState`, `SkillRef`; event/status constants |
-| `internal/runtime` | Pure reducer, session lane, action dispatcher, LLM context builder |
-| `internal/worker` | Side-effect execution: OpenAI-compatible LLM provider, tool worker |
-| `internal/tool` | `Tool` interface, registry, toolsets, policy, retry, idempotency, mock tools |
-| `internal/skill` | File-based skill store, deterministic selector, `<orbis_skills>` context builder, skill events |
-| `internal/gateway` | HTTP + WebSocket boundary (routing, WS request loop, skill HTTP endpoints, debug webview) |
-| `internal/broker` | WebSocket event broker (per-session publish/subscribe) |
-| `internal/protocol` | Wire DTOs (request/response/event envelopes, skill payloads) |
-| `internal/store` | File store: JSONL events, JSON session/run snapshots, tool-call records |
-| `internal/queue` | In-memory event queue |
-| `internal/config` | `.env` loading into `Config` |
+- reducer는 pure function입니다. LLM, tool, network, disk, goroutine을 직접 호출하지 않습니다.
+- 모든 side effect는 worker가 실행하고, 결과는 다시 event로 들어옵니다.
+- 같은 session의 state mutation은 session lane 안에서 순서대로 처리됩니다.
+- side effect action은 idempotency key를 가져야 합니다.
+- 중요한 runtime 변화는 log, JSONL, WebSocket event stream으로 관찰 가능해야 합니다.
+- cancellation과 timeout은 `context.Context`로 전달됩니다.
 
-### Runtime invariants
+## 시작하기
 
-- **Reducer is pure** — no LLM/tool/IO/goroutines; only state → next state + actions + derived events.
-- **Session state is serialized** — one reducer mutates a session at a time (session lane); different sessions run concurrently.
-- **Workers own side effects** — LLM/tool/timer calls happen in workers and return as events.
-- **Idempotency** — every side-effecting action carries a stable idempotency key.
-- **Observability** — structured `slog` logs plus runtime events for every important transition.
-- **Cancellation** — `context.Context`; a cancelled run dispatches no new side effects.
-- **Graceful shutdown** — `RuntimeService.Close()` drains in-flight session-queue and dispatch goroutines before exit.
-
-## Capabilities
-
-- **v0.1 kernel** — event loop, session lanes, reducer/dispatcher, real LLM worker, mock tools, timer, WebSocket broker, JSONL persistence, run cancel/timeout, `AssistantDelta` streaming.
-- **v0.2 tool calling** — the LLM only *proposes* a tool call; the runtime validates (toolsets + ordered policy), authorizes, dispatches, executes (Tool Worker), observes, and persists it, with idempotent dedup, visible retry/backoff, timeout, and deny-by-default dangerous tools. See [`docs/tool-calling.md`](docs/tool-calling.md).
-- **v1 skills** — reusable procedural knowledge, selected deterministically (no LLM) and injected as an `<orbis_skills>` instructions block before planning; lifecycle events, per-run snapshot, and a read-only skill API (WS + HTTP). See [`docs/skills.md`](docs/skills.md).
-- **v1.5** — graceful server shutdown; agentic continuation after a tool-policy denial (bounded per run); tool-aware skill scoring (enabled tools boost related skills).
-- **v2 skill learning** — a reviewable learning loop: the runtime derives **Skill Proposals** from completed runs (deterministic, no LLM), a human approves or rejects them over admin-guarded APIs, and only approval promotes a proposal into `data/skills/` (with provenance, versioning, an audit trail, and an automatic index reload). Nothing is promoted automatically. See [`docs/skill-learning.md`](docs/skill-learning.md).
-
-### Tools vs Skills vs Proposals
-
-- **Tool** = runtime-controlled side-effect execution. The LLM proposes; only the Tool Worker runs it.
-- **Skill** = reusable procedural knowledge for planning and tool use. It never executes a side effect; it is loaded into the LLM context before planning.
-- **Skill Proposal** = a reviewable candidate skill derived from a run. It is *not* an active skill until a human approves it (`SkillProposalCreated != SkillPromoted`).
-
-## Quick Start
-
-Configure runtime settings through `.env`:
+Go 1.22+ 환경을 권장합니다.
 
 ```bash
-cp .env.example .env
+go test ./...
 ```
 
-Required local settings:
+`.env`는 local runtime 설정입니다. 실제 값은 commit하지 않고, safe placeholder는
+`.env.example`에 유지합니다.
 
 ```text
 ORBIS_ADDR=:8080
 ORBIS_DATA_DIR=data
 ORBIS_LLM_PROVIDER=openai
 ORBIS_LLM_MODEL=<model>
-ORBIS_RUN_TIMEOUT=2m
 OPENAI_API_KEY=<api-key>
 OPENAI_BASE_URL=https://api.openai.com
 ```
 
-Start the server (SIGINT/SIGTERM shuts down gracefully and drains the runtime):
+서버 실행:
 
 ```bash
 go run ./cmd/orbis serve
 ```
 
-Open the built-in runtime debugger:
+상태 확인:
 
-```text
-http://localhost:8080/debug
+```bash
+curl -fsS http://127.0.0.1:8080/healthz
+curl -fsS http://127.0.0.1:8080/readyz
 ```
 
-The debug view uses the same WebSocket protocol as external clients. Enter a
-prompt, watch the ACK, runtime event timeline, run status, selected event
-payloads, and final answer in one browser view.
+## Debug Visualizer
 
-Run a WebSocket smoke client against the configured `ORBIS_ADDR`:
+실제 runtime event loop를 눈으로 확인하려면 서버를 켠 뒤 다음 주소를 엽니다.
+
+```bash
+open http://127.0.0.1:8080/debug
+```
+
+`/debug`는 외부 client와 동일한 `/ws` protocol을 사용합니다. prompt를 보내면
+runtime map에서 Gateway, Queue, Session Lane, Reducer, Dispatcher, Worker,
+Broker, Terminal node가 event에 맞춰 강조되고, timeline과 payload panel에서 실제
+event 내용을 확인할 수 있습니다.
+
+추천 prompt:
+
+```text
+안녕. Orbis 런타임 이벤트 루프가 정상 동작하는지 짧게 답해줘.
+```
+
+skill selection 확인:
+
+```text
+WebSocket으로 Orbis 런타임 테스트 방법 알려줘.
+```
+
+tool call 확인:
+
+```text
+Use the math.add tool to add 1 and 2, then reply with the numeric result.
+```
+
+## WebSocket Smoke Test
+
+서버를 실행한 상태에서 다른 terminal에서 smoke client를 실행합니다.
 
 ```bash
 go run ./cmd/orbis ws smoke          # basic run to RunCompleted
-go run ./cmd/orbis ws smoke tool     # drives a real tool call
-go run ./cmd/orbis ws smoke skill    # drives skill selection + injection
+go run ./cmd/orbis ws smoke tool     # real tool call path
+go run ./cmd/orbis ws smoke skill    # skill selection + injection path
 ```
 
-The smoke client sends a `session.message` request, prints ACK/event names, and
-exits successfully only after `RunCompleted`.
+smoke client는 `session.subscribe` 후 `session.message`를 보내고, ACK와 event
+이름을 출력합니다. `RunCompleted`까지 도달하지 못하면 실패합니다.
 
-## WebSocket & HTTP API
+## Manual WebSocket Test
 
-Connect to `ws://localhost:8080/ws` and send request envelopes:
+```bash
+wscat -c ws://localhost:8080/ws
+```
+
+먼저 session을 subscribe합니다.
+
+```json
+{"type":"req","id":"sub_1","method":"session.subscribe","params":{"session_id":"manual_1"}}
+```
+
+그 다음 prompt를 보냅니다.
+
+```json
+{"type":"req","id":"msg_1","method":"session.message","params":{"session_id":"manual_1","text":"안녕. Orbis 런타임 테스트 중이야."}}
+```
+
+저장된 event log는 다음 위치에서 확인할 수 있습니다.
+
+```bash
+tail -n 50 data/events/manual_1.jsonl
+```
+
+## HTTP / WebSocket API
+
+기본 HTTP endpoint:
+
+```text
+GET  /healthz
+GET  /readyz
+GET  /debug
+GET  /ws
+GET  /skills
+GET  /skills/{skillID}
+POST /skills/reload
+GET  /skill-proposals?status=pending
+GET  /skill-proposals/{proposalID}
+POST /runs/{runID}/skill-proposals
+POST /skill-proposals/{proposalID}/approve
+POST /skill-proposals/{proposalID}/reject
+```
+
+주요 WebSocket method:
 
 ```json
 {"type":"req","id":"create_1","method":"session.create","params":{"session_id":"session_1"}}
-```
-
-```json
-{"type":"req","id":"msg_1","method":"session.message","params":{"session_id":"session_1","text":"안녕"}}
-```
-
-```json
 {"type":"req","id":"sub_1","method":"session.subscribe","params":{"session_id":"session_1"}}
-```
-
-```json
+{"type":"req","id":"msg_1","method":"session.message","params":{"session_id":"session_1","text":"안녕"}}
 {"type":"req","id":"status_1","method":"run.status","params":{"run_id":"run_msg_1"}}
-```
-
-```json
 {"type":"req","id":"events_1","method":"events.list","params":{"session_id":"session_1","after_seq":0,"limit":100}}
-```
-
-```json
 {"type":"req","id":"cancel_1","method":"run.cancel","params":{"run_id":"run_msg_1"}}
 ```
 
-Skill inspection methods (read-only; never execute a skill). `skill.reload` is
-mutating and requires the admin token as of v2:
+skill catalog method는 read-only입니다. `skill.reload`는 admin token이 필요합니다.
 
 ```json
 {"type":"req","id":"sk_1","method":"skill.list"}
@@ -303,114 +263,73 @@ mutating and requires the admin token as of v2:
 {"type":"req","id":"sk_3","method":"skill.reload","params":{"token":"dev-orbis-admin"}}
 ```
 
-Skill-learning methods (v2). Mutating methods carry the admin token in params:
+## Skills
 
-```json
-{"type":"req","id":"sp_1","method":"skill.proposal.list","params":{"status":"pending"}}
-{"type":"req","id":"sp_2","method":"skill.proposal.get","params":{"proposal_id":"prop_run_1"}}
-{"type":"req","id":"sp_3","method":"skill.proposal.create_from_run","params":{"run_id":"run_1","token":"dev-orbis-admin"}}
-{"type":"req","id":"sp_4","method":"skill.proposal.approve","params":{"proposal_id":"prop_run_1","token":"dev-orbis-admin"}}
-{"type":"req","id":"sp_5","method":"skill.proposal.reject","params":{"proposal_id":"prop_run_1","reason":"too narrow","token":"dev-orbis-admin"}}
-```
+Orbis skill은 tool이 아닙니다. Skill은 LLM prompt에 주입되는 procedural knowledge이고,
+side effect를 실행하지 않습니다.
 
-HTTP endpoints (admin-gated routes take `Authorization: Bearer <ORBIS_ADMIN_TOKEN>`;
-with no token configured they are disabled entirely):
+현재 seed skill:
 
-```text
-GET  /healthz
-GET  /readyz
-GET  /debug                                # browser runtime debugger
-GET  /ws                                    # upgrades to WebSocket
-GET  /skills                                # skill catalog (when skills enabled)
-GET  /skills/{skillID}                      # one skill (metadata + body), 404 if unknown
-POST /skills/reload                         # reload the skill index (admin)
-GET  /skill-proposals?status=pending        # review queue (when learning enabled)
-GET  /skill-proposals/{proposalID}          # one proposal incl. body, 404 if unknown
-POST /runs/{runID}/skill-proposals          # create a proposal from a run (admin)
-POST /skill-proposals/{proposalID}/approve  # approve + promote + reload (admin)
-POST /skill-proposals/{proposalID}/reject   # reject, body {"reason":"..."} (admin)
-```
+- `websocket-runtime-test`
+- `tool-calling-policy`
+- `go-reducer-pattern`
+- `web-search`
+- `docs-lookup`
+- `github-search`
+- `runtime-debug`
+- `test-plan`
 
-## Configuration
+자세한 내용은 [docs/skills.md](docs/skills.md)를 참고합니다.
 
-All settings load from `.env` (see [`.env.example`](.env.example)); nothing is
-hard-coded. Groups:
+## Tool Calling
 
-- **Core** — `ORBIS_ADDR`, `ORBIS_DATA_DIR`, `ORBIS_LLM_PROVIDER`, `ORBIS_LLM_MODEL`, `ORBIS_RUN_TIMEOUT`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`.
-- **Tools** — `ORBIS_TOOLSETS` (default `safe`), `ORBIS_TOOL_TIMEOUT_*`, `ORBIS_TOOL_RETRY_*`, `ORBIS_TOOL_DENIAL_CONTINUATION_MAX` (default 2; 0 fails the run on denial).
-- **Skills** — `ORBIS_SKILLS_ENABLED` (default true), `ORBIS_SKILLS_DIR`, `ORBIS_SKILLS_MAX_SELECTED`, `ORBIS_SKILLS_MAX_CHARS`, `ORBIS_SKILLS_RELOAD_ON_START`.
-- **Skill learning** — `ORBIS_SKILL_LEARNING_ENABLED` (default true), `ORBIS_SKILL_PROPOSALS_DIR`, `ORBIS_SKILL_AUDIT_PATH`, `ORBIS_ADMIN_TOKEN` (default empty = mutating endpoints disabled), `ORBIS_SKILL_AUTO_PROPOSE` (default false; creates pending proposals only, never promotes).
-- **WebSocket** — `ORBIS_WS_READ_TIMEOUT` (default 0 = disabled).
-
-| Area | Main settings | Effect |
-| --- | --- | --- |
-| Server | `ORBIS_ADDR`, `ORBIS_DATA_DIR` | HTTP/WebSocket bind address and file persistence root |
-| LLM | `ORBIS_LLM_PROVIDER`, `ORBIS_LLM_MODEL`, `OPENAI_API_KEY`, `OPENAI_BASE_URL` | Real OpenAI-compatible provider used by the LLM Worker |
-| Run lifecycle | `ORBIS_RUN_TIMEOUT`, `ORBIS_WS_READ_TIMEOUT` | Run timeout and idle WebSocket read behavior |
-| Tools | `ORBIS_TOOLSETS`, `ORBIS_TOOL_TIMEOUT_*`, `ORBIS_TOOL_RETRY_*` | Enabled toolsets, per-call timeout bounds, and retry/backoff policy |
-| Skills | `ORBIS_SKILLS_*` | Deterministic skill selection and `<orbis_skills>` context injection |
-| Learning | `ORBIS_SKILL_*`, `ORBIS_ADMIN_TOKEN` | Reviewable skill proposals, approval/promotion, and audit trail |
-
-## Persistence
-
-File-based under `ORBIS_DATA_DIR` (`data/` by default):
+Tool call도 runtime loop를 통과합니다.
 
 ```text
-data/events/{session_id}.jsonl   # append-only event log (replayable)
-data/sessions/{session_id}.json  # latest session snapshot
-data/runs/{run_id}.json          # latest run snapshot (incl. selected skills)
-data/tool_calls/{key}.json       # tool-call idempotency records
-data/skills/                     # committed seed skills + promoted learned skills
-data/skill_proposals/            # review queue: pending/ approved/ rejected/
-data/audit/skill_audit.jsonl     # skill-learning audit trail
+LLM proposes tool call
+-> reducer validates policy
+-> dispatcher sends action to Tool Worker
+-> Tool Worker executes with timeout/idempotency/retry
+-> result returns as ToolCallSucceeded / ToolCallFailed event
+-> reducer continues the run
 ```
 
-## Development
+자세한 내용은 [docs/tool-calling.md](docs/tool-calling.md)를 참고합니다.
 
-```bash
-make test
-make run
-make smoke
-```
+## Local Verification Checklist
 
-### Runtime testing checklist
-
-Use this sequence when validating runtime behavior locally:
+변경 전후 기본 검증:
 
 ```bash
 go test ./...
 go test -race ./...
 git diff --check
-go run ./cmd/orbis serve
 ```
 
-Then, in another terminal:
+runtime 수동 검증:
 
 ```bash
+go run ./cmd/orbis serve
 curl -fsS http://127.0.0.1:8080/healthz
 go run ./cmd/orbis ws smoke
-go run ./cmd/orbis ws smoke tool
 go run ./cmd/orbis ws smoke skill
 ```
 
-For visual inspection, open `http://127.0.0.1:8080/debug`, send a prompt, and
-verify that the timeline reaches `RunCompleted`. If it reaches `RunFailed`,
-select the failure event and inspect its payload.
-
-For manual WebSocket inspection with `wscat`:
+UI 확인:
 
 ```bash
-wscat -c ws://localhost:8080/ws
+open http://127.0.0.1:8080/debug
 ```
 
-Send a subscription first:
+## Non-goals
 
-```json
-{"type":"req","id":"sub_1","method":"session.subscribe","params":{"session_id":"manual_1"}}
-```
+v0.x에서는 다음을 의도적으로 제외합니다.
 
-Then send a prompt:
+- OpenClaw/Hermes compatibility layer
+- Slack/Telegram/Discord gateway
+- MCP integration
+- distributed queue or external broker
+- Kubernetes deployment
+- long-term memory system beyond current skill proposal flow
 
-```json
-{"type":"req","id":"msg_1","method":"session.message","params":{"session_id":"manual_1","text":"안녕. Orbis 런타임 테스트 중이야."}}
-```
+Orbis의 우선순위는 작은 runtime kernel을 안정적으로 완성하는 것입니다.

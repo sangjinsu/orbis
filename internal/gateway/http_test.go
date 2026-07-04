@@ -58,8 +58,8 @@ func TestHTTPDebugEndpoints(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("GET /debug status = %d, want %d", rec.Code, http.StatusOK)
 		}
-		if !strings.Contains(rec.Body.String(), "Runtime Debug View") {
-			t.Fatalf("GET /debug body missing Runtime Debug View")
+		if !strings.Contains(rec.Body.String(), "Runtime Visualizer") {
+			t.Fatalf("GET /debug body missing Runtime Visualizer")
 		}
 	})
 
