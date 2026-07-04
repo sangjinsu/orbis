@@ -3,64 +3,113 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Orbis Runtime Debug</title>
+    <title>Orbis Runtime Visualizer</title>
     <link rel="stylesheet" href="/debug/styles.css">
   </head>
   <body>
     <main class="shell">
-      <section class="header" aria-labelledby="title">
+      <header class="topbar" aria-labelledby="title">
         <div>
           <p class="eyebrow">Orbis Agent Runtime</p>
-          <h1 id="title">Runtime Debug View</h1>
+          <h1 id="title">Runtime Visualizer</h1>
         </div>
         <div class="status-strip" aria-live="polite">
           <span id="socketState" class="pill state-idle">disconnected</span>
           <span id="runState" class="pill">no run</span>
         </div>
-      </section>
+      </header>
 
-      <section class="control-panel" aria-label="Prompt controls">
-        <label class="field">
+      <section class="command-deck" aria-label="Prompt controls">
+        <label class="field session-field">
           <span>Session</span>
           <input id="sessionId" autocomplete="off" spellcheck="false">
         </label>
         <label class="field prompt-field">
           <span>Prompt</span>
-          <textarea id="promptText" rows="4" spellcheck="false">안녕. Orbis 런타임 내부 흐름을 짧게 설명해줘.</textarea>
+          <textarea id="promptText" rows="3" spellcheck="false">안녕. Orbis 런타임 이벤트 루프가 정상 동작하는지 짧게 답해줘.</textarea>
         </label>
+        <div class="preset-row" aria-label="Prompt presets">
+          <button class="preset" type="button" data-prompt="안녕. Orbis 런타임 이벤트 루프가 정상 동작하는지 짧게 답해줘.">Basic</button>
+          <button class="preset" type="button" data-prompt="WebSocket으로 Orbis 런타임 테스트 방법 알려줘.">Skill</button>
+          <button class="preset" type="button" data-prompt="Use the math.add tool to add 1 and 2, then reply with the numeric result.">Tool</button>
+        </div>
         <div class="actions">
           <button id="connectBtn" type="button">Connect</button>
-          <button id="sendBtn" type="button" disabled>Send prompt</button>
-          <button id="statusBtn" type="button" disabled>Run status</button>
-          <button id="cancelBtn" type="button" disabled>Cancel run</button>
+          <button id="sendBtn" type="button" disabled>Send</button>
+          <button id="statusBtn" type="button" disabled>Status</button>
+          <button id="cancelBtn" type="button" disabled>Cancel</button>
           <button id="clearBtn" type="button">Clear</button>
         </div>
       </section>
 
-      <section class="flow" aria-label="Runtime stages">
-        <div class="stage" data-stage="gateway">
-          <span>Gateway</span>
-          <strong id="gatewayCount">0</strong>
-        </div>
-        <div class="stage" data-stage="queue">
-          <span>Queue</span>
-          <strong id="queueCount">0</strong>
-        </div>
-        <div class="stage" data-stage="reducer">
-          <span>Reducer</span>
-          <strong id="reducerCount">0</strong>
-        </div>
-        <div class="stage" data-stage="worker">
-          <span>Worker</span>
-          <strong id="workerCount">0</strong>
-        </div>
-        <div class="stage" data-stage="terminal">
-          <span>Terminal</span>
-          <strong id="terminalCount">0</strong>
+      <section class="runtime-stage" aria-label="Runtime flow">
+        <div id="runtimeMap" class="runtime-map">
+          <div class="map-grid" aria-hidden="true"></div>
+          <svg class="edges" viewBox="0 0 1000 430" preserveAspectRatio="none" aria-hidden="true">
+            <path data-edge="client-gateway" d="M118 118 L252 118"></path>
+            <path data-edge="gateway-queue" d="M352 118 L486 118"></path>
+            <path data-edge="queue-lane" d="M586 118 L718 118"></path>
+            <path data-edge="lane-reducer" d="M768 144 L768 220 L620 220"></path>
+            <path data-edge="reducer-dispatcher" d="M498 242 L352 242"></path>
+            <path data-edge="dispatcher-worker" d="M252 264 L252 338 L438 338"></path>
+            <path data-edge="worker-queue" d="M560 338 L846 338 L846 118 L586 118"></path>
+            <path data-edge="reducer-broker" d="M620 242 L742 242"></path>
+            <path data-edge="broker-terminal" d="M864 242 L920 242 L920 338 L706 338"></path>
+          </svg>
+
+          <div class="event-token" id="eventToken" aria-hidden="true">
+            <span id="tokenLabel">event</span>
+          </div>
+
+          <article class="node client" data-node="client">
+            <span>Client</span>
+            <strong id="clientCount">0</strong>
+            <small>prompt</small>
+          </article>
+          <article class="node gateway" data-node="gateway">
+            <span>Gateway</span>
+            <strong id="gatewayCount">0</strong>
+            <small>ACK</small>
+          </article>
+          <article class="node queue" data-node="queue">
+            <span>Event Queue</span>
+            <strong id="queueCount">0</strong>
+            <small>facts</small>
+          </article>
+          <article class="node lane" data-node="lane">
+            <span>Session Lane</span>
+            <strong id="laneCount">0</strong>
+            <small>ordered</small>
+          </article>
+          <article class="node reducer" data-node="reducer">
+            <span>Reducer</span>
+            <strong id="reducerCount">0</strong>
+            <small>state</small>
+          </article>
+          <article class="node dispatcher" data-node="dispatcher">
+            <span>Dispatcher</span>
+            <strong id="dispatcherCount">0</strong>
+            <small>actions</small>
+          </article>
+          <article class="node worker" data-node="worker">
+            <span>Worker</span>
+            <strong id="workerCount">0</strong>
+            <small>side effects</small>
+          </article>
+          <article class="node broker" data-node="broker">
+            <span>Broker</span>
+            <strong id="brokerCount">0</strong>
+            <small>stream</small>
+          </article>
+          <article class="node terminal" data-node="terminal">
+            <span>Terminal</span>
+            <strong id="terminalCount">0</strong>
+            <small>done</small>
+          </article>
         </div>
       </section>
 
-      <section class="workspace">
+      <section class="inspector">
         <div class="panel timeline-panel">
           <div class="panel-head">
             <h2>Event timeline</h2>
