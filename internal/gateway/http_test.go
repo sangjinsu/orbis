@@ -49,6 +49,40 @@ func TestHTTPHealthEndpoints(t *testing.T) {
 	}
 }
 
+func TestHTTPDebugEndpoints(t *testing.T) {
+	handler := NewHTTPHandler(&recordingRuntime{})
+
+	t.Run("index", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/debug", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /debug status = %d, want %d", rec.Code, http.StatusOK)
+		}
+		if !strings.Contains(rec.Body.String(), "Runtime Debug View") {
+			t.Fatalf("GET /debug body missing Runtime Debug View")
+		}
+	})
+
+	t.Run("asset", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/debug/app.js", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /debug/app.js status = %d, want %d", rec.Code, http.StatusOK)
+		}
+		if !strings.Contains(rec.Body.String(), "session.message") {
+			t.Fatalf("GET /debug/app.js body missing session.message")
+		}
+	})
+
+	t.Run("missing asset", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/debug/missing.js", nil))
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("GET /debug/missing.js status = %d, want %d", rec.Code, http.StatusNotFound)
+		}
+	})
+}
+
 func TestHTTPSkillsEndpoints(t *testing.T) {
 	skills := &recordingSkills{
 		list: protocol.SkillListPayload{Skills: []protocol.SkillSummary{
