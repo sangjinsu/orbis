@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -678,6 +679,169 @@ func TestRuntimeServicePublishesSkillEventsWhenEnabled(t *testing.T) {
 	received := collectRuntimeEventsUntil(t, events, string(domain.EventRunCompleted))
 	if !containsEvent(received, string(domain.EventSkillApplied)) {
 		t.Fatalf("events = %#v, want SkillApplied", eventNames(received))
+	}
+}
+
+// toolRunProvider returns a fake provider that proposes one echo tool call and
+// then finishes, so a run completes having used a tool.
+func toolRunProvider() *fakeProvider {
+	return &fakeProvider{
+		streamBatches: [][]worker.LLMStreamEvent{
+			{
+				{
+					ToolCall: &worker.ToolCall{
+						ToolCallID: "call_1",
+						Name:       "echo",
+						Args:       json.RawMessage(`{"text":"hello"}`),
+					},
+					Done: true,
+				},
+			},
+			{
+				{Delta: "tool complete", ProviderResponseID: "resp_2"},
+				{Done: true, ProviderResponseID: "resp_2"},
+			},
+		},
+	}
+}
+
+// newLearningService builds a runtime service with the v2 skill-learning loop
+// wired (proposal store + audit log) on top of the tool-run harness.
+func newLearningService(t *testing.T, autoPropose bool) (*RuntimeService, *skill.ProposalStore, *store.FileStore, string, <-chan protocol.RuntimeEvent, func()) {
+	t.Helper()
+	fileStore := store.NewFileStore(t.TempDir())
+	eventBroker := broker.New()
+	events, unsubscribe := eventBroker.Subscribe(context.Background(), "session_1")
+
+	proposals, err := skill.NewProposalStore(filepath.Join(fileStore.Root(), "skill_proposals"))
+	if err != nil {
+		t.Fatalf("NewProposalStore() error = %v", err)
+	}
+	auditPath := filepath.Join(fileStore.Root(), "audit", "skill_audit.jsonl")
+	service := NewRuntimeService(RuntimeServiceConfig{
+		Store:            fileStore,
+		Broker:           eventBroker,
+		LLMProvider:      toolRunProvider(),
+		ToolRunner:       mockToolWorker(t, fileStore),
+		ProposalStore:    proposals,
+		AuditLog:         skill.NewAuditLog(auditPath),
+		SkillAutoPropose: autoPropose,
+		Now:              func() time.Time { return time.Unix(1700000000, 0).UTC() },
+	})
+	return service, proposals, fileStore, auditPath, events, unsubscribe
+}
+
+// completeToolRun drives one session.message through the service until the run
+// is persisted as COMPLETED and returns its run id.
+func completeToolRun(t *testing.T, service *RuntimeService, fileStore *store.FileStore, events <-chan protocol.RuntimeEvent) string {
+	t.Helper()
+	ctx := context.Background()
+	payload, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
+		Type:   "req",
+		ID:     "req_learn",
+		Method: "session.message",
+		Params: json.RawMessage(`{"session_id":"session_1","text":"use echo to say hello"}`),
+	})
+	if err != nil {
+		t.Fatalf("session.message error = %v", err)
+	}
+	ack := decodeAck(t, payload)
+	_ = collectRuntimeEventsUntil(t, events, string(domain.EventRunCompleted))
+	waitFor(t, func() bool {
+		run, err := fileStore.LoadRun(ctx, ack.RunID)
+		return err == nil && run.Status == domain.RunCompleted
+	})
+	return ack.RunID
+}
+
+func TestRuntimeServiceCreatesSkillProposalFromRun(t *testing.T) {
+	service, proposals, fileStore, auditPath, events, unsubscribe := newLearningService(t, false)
+	defer unsubscribe()
+	defer service.Close()
+	runID := completeToolRun(t, service, fileStore, events)
+
+	proposal, err := service.CreateSkillProposalFromRun(context.Background(), runID, "developer", true)
+	if err != nil {
+		t.Fatalf("CreateSkillProposalFromRun() error = %v", err)
+	}
+	if proposal.Status != skill.ProposalPending || proposal.SourceRunID != runID {
+		t.Fatalf("proposal = %#v, want pending proposal for %s", proposal, runID)
+	}
+	if len(proposal.RelatedTools) != 1 || proposal.RelatedTools[0] != "echo" {
+		t.Fatalf("RelatedTools = %v, want [echo]", proposal.RelatedTools)
+	}
+
+	received := collectRuntimeEventsUntil(t, events, string(domain.EventSkillReviewRequired))
+	assertOrderedSubsequence(t, eventNames(received),
+		string(domain.EventSkillCandidateDetected),
+		string(domain.EventSkillProposalCreated),
+		string(domain.EventSkillReviewRequired),
+	)
+
+	pending, err := proposals.List(skill.ProposalPending)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("List(pending) = %v, %v; want one pending proposal", pending, err)
+	}
+	audit, err := os.ReadFile(auditPath)
+	if err != nil || !strings.Contains(string(audit), string(domain.EventSkillProposalCreated)) {
+		t.Fatalf("audit log = %q, %v; want a SkillProposalCreated record", audit, err)
+	}
+
+	// The proposal id is deterministic per run, so a second manual request for
+	// the same run is rejected as a duplicate instead of creating another one.
+	if _, err := service.CreateSkillProposalFromRun(context.Background(), runID, "developer", true); err == nil {
+		t.Fatal("second CreateSkillProposalFromRun() error = nil, want duplicate error")
+	}
+}
+
+func TestRuntimeServiceAutoProposeCreatesPendingProposalOnly(t *testing.T) {
+	service, proposals, fileStore, _, events, unsubscribe := newLearningService(t, true)
+	defer unsubscribe()
+	defer service.Close()
+	completeToolRun(t, service, fileStore, events)
+
+	// The auto hook runs in a tracked goroutine after RunCompleted.
+	waitFor(t, func() bool {
+		pending, err := proposals.List(skill.ProposalPending)
+		return err == nil && len(pending) == 1
+	})
+	received := collectRuntimeEventsUntil(t, events, string(domain.EventSkillReviewRequired))
+	if !containsEvent(received, string(domain.EventSkillProposalCreated)) {
+		t.Fatalf("events = %#v, want SkillProposalCreated", eventNames(received))
+	}
+	pending, err := proposals.List(skill.ProposalPending)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("List(pending) = %v, %v; want exactly one", pending, err)
+	}
+	// Auto-propose never promotes: the proposal stays pending.
+	if pending[0].Status != skill.ProposalPending {
+		t.Fatalf("auto proposal status = %q, want pending", pending[0].Status)
+	}
+}
+
+func TestRuntimeServiceAutoProposeDefaultOffCreatesNothing(t *testing.T) {
+	service, proposals, fileStore, _, events, unsubscribe := newLearningService(t, false)
+	defer unsubscribe()
+	defer service.Close()
+	completeToolRun(t, service, fileStore, events)
+
+	all, err := proposals.List("")
+	if err != nil || len(all) != 0 {
+		t.Fatalf("List() = %v, %v; want no proposals with auto-propose off", all, err)
+	}
+}
+
+func TestCreateSkillProposalRequiresLearningEnabled(t *testing.T) {
+	fileStore := store.NewFileStore(t.TempDir())
+	service := NewRuntimeService(RuntimeServiceConfig{
+		Store:       fileStore,
+		LLMProvider: &fakeProvider{response: worker.LLMResponse{Text: "ok"}},
+		Now:         func() time.Time { return time.Unix(1700000000, 0).UTC() },
+	})
+	defer service.Close()
+
+	if _, err := service.CreateSkillProposalFromRun(context.Background(), "run_x", "developer", true); !errors.Is(err, errSkillLearningDisabled) {
+		t.Fatalf("error = %v, want errSkillLearningDisabled", err)
 	}
 }
 

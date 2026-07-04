@@ -46,6 +46,19 @@ func NewHTTPServer(cfg config.Config) (*http.Server, *RuntimeService, error) {
 		skillCatalog = skillStore
 	}
 
+	// Skill learning (v2): reviewable proposals plus an audit trail. Runtime
+	// data lives under data/ (never .workspace); nil when learning is disabled.
+	var proposalStore *skill.ProposalStore
+	var auditLog *skill.AuditLog
+	if cfg.SkillLearningEnabled {
+		ps, err := skill.NewProposalStore(cfg.SkillProposalsDir)
+		if err != nil {
+			return nil, nil, fmt.Errorf("init skill proposals at %s: %w", cfg.SkillProposalsDir, err)
+		}
+		proposalStore = ps
+		auditLog = skill.NewAuditLog(cfg.SkillAuditPath)
+	}
+
 	registry := tool.NewRegistry()
 	_ = tool.RegisterMockTools(registry, nil)
 	enabledToolsets := tool.ParseToolsets(cfg.Toolsets)
@@ -77,13 +90,16 @@ func NewHTTPServer(cfg config.Config) (*http.Server, *RuntimeService, error) {
 	}
 
 	runtime := NewRuntimeService(RuntimeServiceConfig{
-		Store:        fileStore,
-		Broker:       eventBroker,
-		LLMProvider:  provider,
-		ToolRunner:   toolWorker,
-		ToolSchemas:  toolSchemas,
-		SkillBodies:  skillBodies,
-		SkillCatalog: skillCatalog,
+		Store:            fileStore,
+		Broker:           eventBroker,
+		LLMProvider:      provider,
+		ToolRunner:       toolWorker,
+		ToolSchemas:      toolSchemas,
+		SkillBodies:      skillBodies,
+		SkillCatalog:     skillCatalog,
+		ProposalStore:    proposalStore,
+		AuditLog:         auditLog,
+		SkillAutoPropose: cfg.SkillAutoPropose,
 		ReducerConfig: orbisruntime.ReducerConfig{
 			ToolTimeout:               cfg.ToolTimeoutDefault,
 			Retry:                     retryPolicy,
