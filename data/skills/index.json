@@ -38,6 +38,71 @@
       "status": "active",
       "priority": 80,
       "related_tools": []
+    },
+    {
+      "id": "web-search",
+      "name": "web-search",
+      "title": "Web Search",
+      "description": "Procedure for planning safe web searches for current or externally verifiable information.",
+      "tags": ["web", "search", "source", "current"],
+      "triggers": ["web_search", "web search", "search web", "current info", "latest", "recent changes"],
+      "path": "web-search.md",
+      "version": "1.0.0",
+      "status": "active",
+      "priority": 70,
+      "related_tools": []
+    },
+    {
+      "id": "docs-lookup",
+      "name": "docs-lookup",
+      "title": "Docs Lookup",
+      "description": "Procedure for checking official documentation before using SDKs, APIs, frameworks, CLIs, or cloud services.",
+      "tags": ["docs", "api", "sdk", "official"],
+      "triggers": ["docs", "official docs", "api docs", "sdk", "cli usage", "configuration"],
+      "path": "docs-lookup.md",
+      "version": "1.0.0",
+      "status": "active",
+      "priority": 68,
+      "related_tools": []
+    },
+    {
+      "id": "github-search",
+      "name": "github-search",
+      "title": "GitHub Search",
+      "description": "Procedure for searching GitHub repositories, issues, pull requests, releases, and history.",
+      "tags": ["github", "issue", "pull-request", "release"],
+      "triggers": ["github", "github search", "gh search", "issue", "pull request", "release"],
+      "path": "github-search.md",
+      "version": "1.0.0",
+      "status": "active",
+      "priority": 66,
+      "related_tools": []
+    },
+    {
+      "id": "runtime-debug",
+      "name": "runtime-debug",
+      "title": "Runtime Debug",
+      "description": "Procedure for debugging Orbis runtime behavior through events, run state, logs, and the debug webview.",
+      "tags": ["runtime", "debug", "websocket", "event"],
+      "triggers": ["runtime debug", "debug runtime", "/debug", "event flow", "run failed", "missing event"],
+      "path": "runtime-debug.md",
+      "version": "1.0.0",
+      "status": "active",
+      "priority": 64,
+      "related_tools": ["session.message", "run.status", "events.list"]
+    },
+    {
+      "id": "test-plan",
+      "name": "test-plan",
+      "title": "Test Plan",
+      "description": "Procedure for creating focused verification plans and acceptance checks for Orbis changes.",
+      "tags": ["test", "verification", "acceptance", "smoke"],
+      "triggers": ["test plan", "verify", "verification", "acceptance", "smoke test", "manual test"],
+      "path": "test-plan.md",
+      "version": "1.0.0",
+      "status": "active",
+      "priority": 62,
+      "related_tools": []
     }
   ]
 }
