@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -223,6 +224,38 @@ func TestAuditLogAppendsJSONLines(t *testing.T) {
 	}
 	if len(got) != 2 || got[0].AuditID != "audit_1" || got[1].EventType != "SkillPromoted" {
 		t.Fatalf("audit records = %#v, want the two appended records in order", got)
+	}
+}
+
+func TestRerenderMatchesBuilderRendering(t *testing.T) {
+	now := time.Unix(1700000000, 0).UTC()
+	edited := testProposal("prop_1", now)
+	edited.Rerender()
+	baseline := edited
+
+	edited.Title = "Edited workflow"
+	edited.Procedure = []string{"first step", "second step"}
+	edited.Rerender()
+
+	if edited.Body == baseline.Body || edited.ContentHash == baseline.ContentHash {
+		t.Fatal("Rerender() did not change body/hash after a field edit")
+	}
+	if edited.ContentHash != contentHash(edited.Body) {
+		t.Fatal("Rerender() hash does not match the body derivation")
+	}
+	// Re-rendering is deterministic: same fields, same body and hash.
+	twin := testProposal("prop_1", now)
+	twin.Title = "Edited workflow"
+	twin.Procedure = []string{"first step", "second step"}
+	twin.Rerender()
+	if twin.Body != edited.Body || twin.ContentHash != edited.ContentHash {
+		t.Fatal("Rerender() is not deterministic for identical fields")
+	}
+	// Clearing a list drops its section entirely (writeList skips empty lists).
+	edited.RelatedTools = nil
+	edited.Rerender()
+	if strings.Contains(edited.Body, "## Related Tools") {
+		t.Fatal("Rerender() kept the Related Tools section after clearing the list")
 	}
 }
 

@@ -99,8 +99,26 @@ type SkillProposalSummary struct {
 	Version          string    `json:"version,omitempty"`
 	ContentHash      string    `json:"content_hash,omitempty"`
 	PromotedSkillID  string    `json:"promoted_skill_id,omitempty"`
+	Revision         int       `json:"revision,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+// SkillProposalUpdateRequest is a reviewer's partial edit of a pending
+// proposal's structured fields (v2.1). A nil field is left unchanged; a
+// non-nil field replaces the stored value. Only the fields that compose the
+// rendered body are editable — the body and content hash are re-derived
+// server-side, and identity fields (skill_id, source_run_id) and the detection
+// rationale are not editable at all.
+type SkillProposalUpdateRequest struct {
+	Title           *string   `json:"title,omitempty"`
+	Purpose         *string   `json:"purpose,omitempty"`
+	WhenToUse       *string   `json:"when_to_use,omitempty"`
+	RequiredContext *[]string `json:"required_context,omitempty"`
+	Procedure       *[]string `json:"procedure,omitempty"`
+	RelatedTools    *[]string `json:"related_tools,omitempty"`
+	Verification    *[]string `json:"verification,omitempty"`
+	Pitfalls        *[]string `json:"pitfalls,omitempty"`
 }
 
 // SkillProposalListPayload is the response to skill.proposal.list /

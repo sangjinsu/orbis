@@ -46,6 +46,9 @@ type SkillProposal struct {
 	PromotedSkillID  string              `json:"promoted_skill_id,omitempty"`
 	Version          string              `json:"version,omitempty"`
 	ContentHash      string              `json:"content_hash,omitempty"`
+	// Revision counts reviewer edits while pending (0 = as created). It keys
+	// per-edit audit records and event ids so repeated edits stay unique.
+	Revision int `json:"revision,omitempty"`
 }
 
 // Validate checks the fields every stored proposal must carry.

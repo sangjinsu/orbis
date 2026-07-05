@@ -35,6 +35,7 @@ type SkillLearning interface {
 	ListSkillProposals(status string) (protocol.SkillProposalListPayload, error)
 	GetSkillProposal(id string) (protocol.SkillProposalDetailPayload, bool, error)
 	CreateSkillProposal(ctx context.Context, runID string) (protocol.SkillProposalDetailPayload, error)
+	UpdateSkillProposal(ctx context.Context, id string, fields protocol.SkillProposalUpdateRequest) (protocol.SkillProposalDetailPayload, error)
 	ApproveSkillProposal(ctx context.Context, id string) (protocol.SkillProposalDetailPayload, error)
 	RejectSkillProposal(ctx context.Context, id, reason string) (protocol.SkillProposalDetailPayload, error)
 }
@@ -176,6 +177,22 @@ func NewHTTPHandler(runtime Runtime, opts ...HandlerOption) http.Handler {
 				return
 			}
 			writeJSON(w, http.StatusCreated, detail)
+		})
+		mux.HandleFunc("PATCH /skill-proposals/{proposalID}", func(w http.ResponseWriter, r *http.Request) {
+			if !requireAdmin(w, r, cfg.adminToken) {
+				return
+			}
+			var fields protocol.SkillProposalUpdateRequest
+			if err := json.NewDecoder(r.Body).Decode(&fields); err != nil {
+				http.Error(w, "invalid request body", http.StatusBadRequest)
+				return
+			}
+			detail, err := cfg.learning.UpdateSkillProposal(r.Context(), r.PathValue("proposalID"), fields)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, http.StatusOK, detail)
 		})
 		mux.HandleFunc("POST /skill-proposals/{proposalID}/approve", func(w http.ResponseWriter, r *http.Request) {
 			if !requireAdmin(w, r, cfg.adminToken) {

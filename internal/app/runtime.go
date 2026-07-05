@@ -217,6 +217,8 @@ func (s *RuntimeService) HandleClientRequest(ctx context.Context, req protocol.C
 		return s.handleSkillProposalGet(ctx, req)
 	case "skill.proposal.create_from_run":
 		return s.handleSkillProposalCreate(ctx, req)
+	case "skill.proposal.update":
+		return s.handleSkillProposalUpdate(ctx, req)
 	case "skill.proposal.approve":
 		return s.handleSkillProposalApprove(ctx, req)
 	case "skill.proposal.reject":
