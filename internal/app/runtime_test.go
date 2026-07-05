@@ -1077,6 +1077,93 @@ func TestRuntimeServiceApproveConflictMarksFailed(t *testing.T) {
 	}
 }
 
+func TestRuntimeServiceApproveBumpsExistingLearnedSkill(t *testing.T) {
+	ctx := context.Background()
+	service, proposals, skillStore, fileStore, skillsDir, _, events, unsubscribe := newReviewService(t)
+	defer unsubscribe()
+	defer service.Close()
+	runID := completeToolRun(t, service, fileStore, events)
+
+	// First promotion lands the learned skill at v1.
+	first, err := service.CreateSkillProposalFromRun(ctx, runID, skill.ActorAdmin, true)
+	if err != nil {
+		t.Fatalf("CreateSkillProposalFromRun() error = %v", err)
+	}
+	if _, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
+		Type: "req", ID: "sp_v1", Method: "skill.proposal.approve",
+		Params: json.RawMessage(`{"proposal_id":"` + first.ProposalID + `","token":"admin-tok"}`),
+	}); err != nil {
+		t.Fatalf("first approve error = %v", err)
+	}
+	_ = collectRuntimeEventsUntil(t, events, string(domain.EventSkillAuditRecorded))
+
+	// A second proposal targets the same skill id (created manually: the
+	// deterministic prop_<runID> id is already taken by the first proposal).
+	now := time.Unix(1700000000, 0).UTC()
+	second := skill.SkillProposal{
+		ProposalID:  "prop_v2",
+		SourceRunID: runID,
+		Title:       "Learned workflow, revised",
+		SkillID:     first.SkillID,
+		Purpose:     "Revised purpose",
+		Body:        "# Learned workflow, revised\n\nUpdated procedure.",
+		Status:      skill.ProposalPending,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := proposals.Create(second); err != nil {
+		t.Fatalf("Create(second) error = %v", err)
+	}
+
+	approvePayload, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
+		Type: "req", ID: "sp_v2", Method: "skill.proposal.approve",
+		Params: json.RawMessage(`{"proposal_id":"prop_v2","token":"admin-tok"}`),
+	})
+	if err != nil {
+		t.Fatalf("second approve error = %v", err)
+	}
+	var promoted protocol.SkillProposalDetailPayload
+	if err := json.Unmarshal(approvePayload, &promoted); err != nil {
+		t.Fatalf("unmarshal promoted proposal: %v", err)
+	}
+	if promoted.Status != string(skill.ProposalPromoted) || promoted.Version != "2" {
+		t.Fatalf("approve payload = %#v, want promoted at version 2", promoted.SkillProposalSummary)
+	}
+
+	// The SkillPromoted event carries the new version.
+	received := collectRuntimeEventsUntil(t, events, string(domain.EventSkillAuditRecorded))
+	sawPromoted := false
+	for _, ev := range received {
+		if ev.Event != string(domain.EventSkillPromoted) {
+			continue
+		}
+		sawPromoted = true
+		var payload struct {
+			Version string `json:"version"`
+		}
+		if err := json.Unmarshal(ev.Payload, &payload); err != nil || payload.Version != "2" {
+			t.Fatalf("SkillPromoted payload = %s, %v; want version 2", ev.Payload, err)
+		}
+	}
+	if !sawPromoted {
+		t.Fatal("SkillPromoted event not observed for the version bump")
+	}
+
+	// One index entry at v2, the reloaded store serves the new body, and the
+	// previous body is archived.
+	entry, ok := skillStore.Get(first.SkillID)
+	if !ok || entry.Version != "2" || entry.Body != second.Body {
+		t.Fatalf("reloaded entry = %#v, want v2 with the revised body", entry.Metadata)
+	}
+	if entry.SourceProposalID != "prop_v2" {
+		t.Fatalf("provenance = %q, want prop_v2", entry.SourceProposalID)
+	}
+	archived, err := os.ReadFile(filepath.Join(skillsDir, "archive", first.SkillID+"@1.md"))
+	if err != nil || string(archived) != first.Body {
+		t.Fatalf("archived body = %q, %v; want the v1 body", archived, err)
+	}
+}
+
 func TestSkillLearningWSAdminGating(t *testing.T) {
 	ctx := context.Background()
 

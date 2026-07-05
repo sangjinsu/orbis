@@ -90,9 +90,18 @@ A promoted skill's index entry records:
 - the content hash is recorded on the promoted proposal and re-derived as the
   entry's hash at load (same body, same derivation)
 
-**Versioning/conflicts:** v2 rejects promotion when the skill id already exists
-(`ErrSkillConflict`); the proposal is marked `failed` and can be retried after
-the conflict is resolved. Multi-version promotion is future work.
+**Versioning/conflicts:** promoting a proposal whose skill id already exists
+bumps the learned skill in place (v2.1): the version increments (`"1"` → `"2"`),
+the new body replaces `{skill_id}.md`, and the previous body is preserved as
+`archive/{skill_id}@{old_version}.md`. The index keeps one entry per id — its
+identity, path, tags, and priority are unchanged while the title, description,
+related tools, and provenance refresh to describe the new version. Two cases
+still fail the promotion (the proposal is marked `failed` and can be retried):
+
+- the existing entry has no learned provenance (`source_proposal_id` is empty)
+  — curated seed skills are never replaced (`ErrSkillConflict`)
+- the existing learned entry carries a non-integer version — a corrupt entry
+  fails loudly instead of guessing a next version
 
 ## Audit
 
@@ -182,8 +191,6 @@ Then inspect `data/skill_proposals/`, `data/skills/index.json`, and
 
 - Proposal bodies are deterministic templates rendered from run data; there is
   no LLM authoring and no edit-before-approve (future work).
-- Same-id promotion is rejected instead of versioned (multi-version is future
-  work).
 - Lifecycle events are scoped to the source run's session; the standalone
   `/skills/reload` emits no events.
 - The admin token is a single static bearer for local development, not a full

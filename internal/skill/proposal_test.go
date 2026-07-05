@@ -240,26 +240,28 @@ func TestVersioningHelpers(t *testing.T) {
 		t.Fatalf("normalizeVersion(\" 2 \") = %q, want 2", got)
 	}
 
-	index := fakeIndexWith("existing-skill")
-	if err := EnsureSkillIDAvailable(index, "existing-skill"); !errors.Is(err, ErrSkillConflict) {
-		t.Fatalf("EnsureSkillIDAvailable(existing) error = %v, want ErrSkillConflict", err)
+	for _, tc := range []struct {
+		current string
+		want    string
+		wantErr bool
+	}{
+		{current: "1", want: "2"},
+		{current: "9", want: "10"},
+		{current: " 3 ", want: "4"},
+		{current: "", wantErr: true},
+		{current: "0", wantErr: true},
+		{current: "1.0.0", wantErr: true},
+		{current: "abc", wantErr: true},
+	} {
+		got, err := nextVersion(tc.current)
+		if tc.wantErr {
+			if err == nil {
+				t.Fatalf("nextVersion(%q) error = nil, want non-integer error", tc.current)
+			}
+			continue
+		}
+		if err != nil || got != tc.want {
+			t.Fatalf("nextVersion(%q) = %q, %v; want %q", tc.current, got, err, tc.want)
+		}
 	}
-	if err := EnsureSkillIDAvailable(index, "new-skill"); err != nil {
-		t.Fatalf("EnsureSkillIDAvailable(new) error = %v, want nil", err)
-	}
-	if err := EnsureSkillIDAvailable(nil, "any"); err != nil {
-		t.Fatalf("EnsureSkillIDAvailable(nil index) error = %v, want nil", err)
-	}
-}
-
-type staticIndex struct{ entries []Entry }
-
-func (s staticIndex) Snapshot() []Entry { return s.entries }
-
-func fakeIndexWith(ids ...string) Index {
-	entries := make([]Entry, 0, len(ids))
-	for _, id := range ids {
-		entries = append(entries, Entry{Metadata: Metadata{ID: id}})
-	}
-	return staticIndex{entries: entries}
 }
