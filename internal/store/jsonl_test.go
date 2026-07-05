@@ -110,3 +110,31 @@ func TestFileStoreListsEventsAfterSeqWithLimit(t *testing.T) {
 		t.Fatalf("event = %#v, want seq 2 UserMessageReceived", events[0])
 	}
 }
+
+// A run snapshot is rewritten by the session event queue while service methods
+// concurrently reload it; readers must never observe a torn write.
+func TestFileStoreConcurrentSaveAndLoadRun(t *testing.T) {
+	ctx := context.Background()
+	fileStore := NewFileStore(t.TempDir())
+	state := domain.RunState{RunID: "run_1", SessionID: "session_1", Status: domain.RunCompleted}
+	if err := fileStore.SaveRun(ctx, state); err != nil {
+		t.Fatalf("SaveRun() error = %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 500; i++ {
+			if err := fileStore.SaveRun(ctx, state); err != nil {
+				t.Errorf("concurrent SaveRun() error = %v", err)
+				return
+			}
+		}
+	}()
+	for i := 0; i < 500; i++ {
+		if _, err := fileStore.LoadRun(ctx, "run_1"); err != nil {
+			t.Fatalf("LoadRun() during concurrent writes error = %v", err)
+		}
+	}
+	<-done
+}
