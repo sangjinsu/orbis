@@ -3,8 +3,11 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
+
+	"github.com/sangjinsu/orbis/internal/auth"
 )
 
 func TestLoadUsesDotEnvValues(t *testing.T) {
@@ -188,8 +191,8 @@ func TestLoadSkillLearningDefaults(t *testing.T) {
 	if cfg.SkillAuditPath != "data/audit/skill_audit.jsonl" {
 		t.Fatalf("SkillAuditPath = %q, want data/audit/skill_audit.jsonl", cfg.SkillAuditPath)
 	}
-	if cfg.AdminToken != "" {
-		t.Fatalf("AdminToken = %q, want empty by default (mutating endpoints disabled)", cfg.AdminToken)
+	if cfg.AuthTokens != nil {
+		t.Fatalf("AuthTokens = %#v, want none by default (mutating endpoints disabled)", cfg.AuthTokens)
 	}
 	if cfg.SkillAutoPropose {
 		t.Fatal("SkillAutoPropose = true, want false by default")
@@ -224,12 +227,69 @@ ORBIS_SKILL_AUTO_PROPOSE=true
 	if cfg.SkillAuditPath != "/tmp/audit.jsonl" {
 		t.Fatalf("SkillAuditPath = %q, want /tmp/audit.jsonl", cfg.SkillAuditPath)
 	}
-	if cfg.AdminToken != "dev-orbis-admin" {
-		t.Fatalf("AdminToken = %q, want dev-orbis-admin", cfg.AdminToken)
+	// The legacy ORBIS_ADMIN_TOKEN is synthesized into an admin entry.
+	want := []auth.TokenEntry{{Name: "admin", Role: auth.RoleAdmin, Token: "dev-orbis-admin"}}
+	if !reflect.DeepEqual(cfg.AuthTokens, want) {
+		t.Fatalf("AuthTokens = %#v, want %#v", cfg.AuthTokens, want)
 	}
 	if !cfg.SkillAutoPropose {
 		t.Fatal("SkillAutoPropose = false, want true")
 	}
+}
+
+func TestLoadAuthTokens(t *testing.T) {
+	load := func(t *testing.T, extra string) (Config, error) {
+		t.Helper()
+		envPath := filepath.Join(t.TempDir(), ".env")
+		content := "ORBIS_LLM_MODEL=gpt-test\nOPENAI_API_KEY=test-key\n" + extra
+		if err := os.WriteFile(envPath, []byte(content), 0o600); err != nil {
+			t.Fatalf("write .env: %v", err)
+		}
+		return Load(envPath)
+	}
+
+	t.Run("new tokens only", func(t *testing.T) {
+		cfg, err := load(t, "ORBIS_AUTH_TOKENS=alice:admin:atok,bob:reviewer:rtok\n")
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		want := []auth.TokenEntry{
+			{Name: "alice", Role: auth.RoleAdmin, Token: "atok"},
+			{Name: "bob", Role: auth.RoleReviewer, Token: "rtok"},
+		}
+		if !reflect.DeepEqual(cfg.AuthTokens, want) {
+			t.Fatalf("AuthTokens = %#v, want %#v", cfg.AuthTokens, want)
+		}
+	})
+
+	t.Run("both set merges the legacy admin token", func(t *testing.T) {
+		cfg, err := load(t, "ORBIS_AUTH_TOKENS=bob:reviewer:rtok\nORBIS_ADMIN_TOKEN=legacy\n")
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		want := []auth.TokenEntry{
+			{Name: "bob", Role: auth.RoleReviewer, Token: "rtok"},
+			{Name: "admin", Role: auth.RoleAdmin, Token: "legacy"},
+		}
+		if !reflect.DeepEqual(cfg.AuthTokens, want) {
+			t.Fatalf("AuthTokens = %#v, want %#v", cfg.AuthTokens, want)
+		}
+	})
+
+	t.Run("legacy conflicts fail loudly", func(t *testing.T) {
+		if _, err := load(t, "ORBIS_AUTH_TOKENS=admin:admin:atok\nORBIS_ADMIN_TOKEN=legacy\n"); err == nil {
+			t.Fatal("Load() error = nil, want admin-name conflict error")
+		}
+		if _, err := load(t, "ORBIS_AUTH_TOKENS=alice:admin:legacy\nORBIS_ADMIN_TOKEN=legacy\n"); err == nil {
+			t.Fatal("Load() error = nil, want duplicate-token conflict error")
+		}
+	})
+
+	t.Run("malformed tokens fail", func(t *testing.T) {
+		if _, err := load(t, "ORBIS_AUTH_TOKENS=alice:root:atok\n"); err == nil {
+			t.Fatal("Load() error = nil, want unknown-role error")
+		}
+	})
 }
 
 func TestLoadRejectsInvalidSkillBool(t *testing.T) {

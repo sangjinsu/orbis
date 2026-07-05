@@ -10,12 +10,14 @@ import (
 )
 
 // Audit actors. Actor identifies who drove a lifecycle transition; it is never
-// a secret or a reasoning trace.
+// a secret or a reasoning trace. As of v2.1 authenticated operations record the
+// token's configured name instead — ActorSystem marks the auto-propose hook,
+// ActorAdmin is the name synthesized for the legacy ORBIS_ADMIN_TOKEN, and
+// ActorUnknown is the empty-actor fallback.
 const (
-	ActorSystem    = "system"
-	ActorAdmin     = "admin"
-	ActorDeveloper = "developer"
-	ActorUnknown   = "unknown"
+	ActorSystem  = "system"
+	ActorAdmin   = "admin"
+	ActorUnknown = "unknown"
 )
 
 // AuditRecord is one line of the skill-learning audit trail. Summary is a

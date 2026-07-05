@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sangjinsu/orbis/internal/auth"
 	"github.com/sangjinsu/orbis/internal/broker"
 	"github.com/sangjinsu/orbis/internal/domain"
 	"github.com/sangjinsu/orbis/internal/protocol"
@@ -601,10 +602,10 @@ func TestRuntimeServiceSkillListGetReload(t *testing.T) {
 		},
 	}
 	service := NewRuntimeService(RuntimeServiceConfig{
-		Store:        store.NewFileStore(t.TempDir()),
-		SkillCatalog: catalog,
-		AdminToken:   "admin-tok",
-		Now:          func() time.Time { return time.Unix(1700000000, 0).UTC() },
+		Store:         store.NewFileStore(t.TempDir()),
+		SkillCatalog:  catalog,
+		Authenticator: testAuthenticator(),
+		Now:           func() time.Time { return time.Unix(1700000000, 0).UTC() },
 	})
 	defer service.Close()
 
@@ -889,7 +890,7 @@ func newReviewService(t *testing.T) (*RuntimeService, *skill.ProposalStore, *ski
 		ProposalStore: proposals,
 		AuditLog:      skill.NewAuditLog(auditPath),
 		Promoter:      skill.NewPromoter(skillsDir),
-		AdminToken:    "admin-tok",
+		Authenticator: testAuthenticator(),
 		Now:           func() time.Time { return time.Unix(1700000000, 0).UTC() },
 	})
 	return service, proposals, skillStore, fileStore, skillsDir, auditPath, events, global, cleanup
@@ -981,7 +982,7 @@ func TestRuntimeServiceRejectFlow(t *testing.T) {
 	defer service.Close()
 	runID := completeToolRun(t, service, fileStore, events)
 
-	proposal, err := service.CreateSkillProposalFromRun(ctx, runID, skill.ActorDeveloper, true)
+	proposal, err := service.CreateSkillProposalFromRun(ctx, runID, "developer", true)
 	if err != nil {
 		t.Fatalf("CreateSkillProposalFromRun() error = %v", err)
 	}
@@ -1244,11 +1245,11 @@ func TestSkillReloadEmitsGlobalEvents(t *testing.T) {
 
 	// With skills disabled the reload fails cleanly and emits nothing at all.
 	disabled := NewRuntimeService(RuntimeServiceConfig{
-		Store:       store.NewFileStore(t.TempDir()),
-		Broker:      broker.New(),
-		LLMProvider: &fakeProvider{response: worker.LLMResponse{Text: "ok"}},
-		AdminToken:  "admin-tok",
-		Now:         func() time.Time { return time.Unix(1700000000, 0).UTC() },
+		Store:         store.NewFileStore(t.TempDir()),
+		Broker:        broker.New(),
+		LLMProvider:   &fakeProvider{response: worker.LLMResponse{Text: "ok"}},
+		Authenticator: testAuthenticator(),
+		Now:           func() time.Time { return time.Unix(1700000000, 0).UTC() },
 	})
 	defer disabled.Close()
 	if _, err := disabled.HandleClientRequest(ctx, protocol.ClientRequest{
@@ -1397,36 +1398,80 @@ func TestSkillLearningWSAdminGating(t *testing.T) {
 	if _, err := noToken.HandleClientRequest(ctx, protocol.ClientRequest{
 		Type: "req", ID: "g1", Method: "skill.proposal.approve",
 		Params: json.RawMessage(`{"proposal_id":"p","token":"anything"}`),
-	}); !errors.Is(err, errAdminDisabled) {
-		t.Fatalf("error = %v, want errAdminDisabled", err)
+	}); !errors.Is(err, auth.ErrDisabled) {
+		t.Fatalf("error = %v, want auth.ErrDisabled", err)
 	}
 	if _, err := noToken.HandleClientRequest(ctx, protocol.ClientRequest{
 		Type: "req", ID: "g1u", Method: "skill.proposal.update",
 		Params: json.RawMessage(`{"proposal_id":"p","token":"anything","title":"t"}`),
-	}); !errors.Is(err, errAdminDisabled) {
-		t.Fatalf("update error = %v, want errAdminDisabled", err)
+	}); !errors.Is(err, auth.ErrDisabled) {
+		t.Fatalf("update error = %v, want auth.ErrDisabled", err)
 	}
 
-	// Token configured: a wrong token is rejected, reads stay open.
+	// Tokens configured: a wrong token is rejected, reads stay open, and a
+	// reviewer token cannot use the admin-only reload.
 	withToken := NewRuntimeService(RuntimeServiceConfig{
 		Store:         store.NewFileStore(t.TempDir()),
 		LLMProvider:   &fakeProvider{response: worker.LLMResponse{Text: "ok"}},
 		ProposalStore: mustProposalStore(t, fileStore),
-		AdminToken:    "admin-tok",
+		Authenticator: testAuthenticator(),
 		Now:           func() time.Time { return time.Unix(1700000000, 0).UTC() },
 	})
 	defer withToken.Close()
 	if _, err := withToken.HandleClientRequest(ctx, protocol.ClientRequest{
 		Type: "req", ID: "g2", Method: "skill.proposal.create_from_run",
 		Params: json.RawMessage(`{"run_id":"run_x","token":"wrong"}`),
-	}); !errors.Is(err, errInvalidAdminToken) {
-		t.Fatalf("error = %v, want errInvalidAdminToken", err)
+	}); !errors.Is(err, auth.ErrInvalidToken) {
+		t.Fatalf("error = %v, want auth.ErrInvalidToken", err)
 	}
 	if _, err := withToken.HandleClientRequest(ctx, protocol.ClientRequest{
 		Type: "req", ID: "g3", Method: "skill.proposal.list",
 	}); err != nil {
 		t.Fatalf("skill.proposal.list without token error = %v, want open read", err)
 	}
+	if _, err := withToken.HandleClientRequest(ctx, protocol.ClientRequest{
+		Type: "req", ID: "g4", Method: "skill.reload",
+		Params: json.RawMessage(`{"token":"rev-tok"}`),
+	}); !errors.Is(err, errRoleForbidden) {
+		t.Fatalf("reviewer reload error = %v, want errRoleForbidden", err)
+	}
+}
+
+func TestReviewerTokenApprovesAndAuditsActor(t *testing.T) {
+	ctx := context.Background()
+	service, _, _, fileStore, _, auditPath, events, _, unsubscribe := newReviewService(t)
+	defer unsubscribe()
+	defer service.Close()
+	runID := completeToolRun(t, service, fileStore, events)
+
+	// The reviewer token drives the whole review flow; the audit trail records
+	// the token's configured name, not a generic "admin".
+	if _, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
+		Type: "req", ID: "rc", Method: "skill.proposal.create_from_run",
+		Params: json.RawMessage(`{"run_id":"` + runID + `","token":"rev-tok"}`),
+	}); err != nil {
+		t.Fatalf("reviewer create error = %v", err)
+	}
+	_ = collectRuntimeEventsUntil(t, events, string(domain.EventSkillReviewRequired))
+	if _, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
+		Type: "req", ID: "ra", Method: "skill.proposal.approve",
+		Params: json.RawMessage(`{"proposal_id":"prop_` + runID + `","token":"rev-tok"}`),
+	}); err != nil {
+		t.Fatalf("reviewer approve error = %v", err)
+	}
+	audit, err := os.ReadFile(auditPath)
+	if err != nil || !strings.Contains(string(audit), `"actor":"rev"`) {
+		t.Fatalf("audit log missing reviewer actor: %v\n%s", err, audit)
+	}
+}
+
+// testAuthenticator configures one admin token and one reviewer token, so
+// tests can exercise both the legacy "admin-tok" paths and role separation.
+func testAuthenticator() *auth.Authenticator {
+	return auth.New([]auth.TokenEntry{
+		{Name: "admin", Role: auth.RoleAdmin, Token: "admin-tok"},
+		{Name: "rev", Role: auth.RoleReviewer, Token: "rev-tok"},
+	})
 }
 
 func mustProposalStore(t *testing.T, fileStore *store.FileStore) *skill.ProposalStore {

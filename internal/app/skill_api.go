@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/sangjinsu/orbis/internal/auth"
 	"github.com/sangjinsu/orbis/internal/domain"
 	"github.com/sangjinsu/orbis/internal/protocol"
 	"github.com/sangjinsu/orbis/internal/skill"
@@ -75,28 +76,32 @@ func (s *RuntimeService) GetSkill(id string) (protocol.SkillDetailPayload, bool)
 }
 
 // skillReloadEventPayload is the metadata payload of the global reload events
-// emitted by the standalone reload endpoint. Actor identifies who asked
-// ("admin" until named principals land); Count is the reloaded skill count.
+// emitted by the standalone reload endpoint. Actor is the authenticated
+// principal's name; Count is the reloaded skill count.
 type skillReloadEventPayload struct {
 	Actor string `json:"actor"`
 	Count int    `json:"count,omitempty"`
 }
 
-// ReloadSkills re-reads the skill index and bodies from disk. It errors when
-// skills are disabled so the caller can surface a clear failure. The
-// standalone reload has no session, so its SkillIndexReloadRequested /
+// ReloadSkills re-reads the skill index and bodies from disk; actor is the
+// authenticated principal's name for the reload events. It errors when skills
+// are disabled so the caller can surface a clear failure. The standalone
+// reload has no session, so its SkillIndexReloadRequested /
 // SkillIndexReloaded events go to the global feed only (the approve flow
 // calls s.skills.Reload() directly and emits session-scoped events itself).
-func (s *RuntimeService) ReloadSkills() error {
+func (s *RuntimeService) ReloadSkills(actor string) error {
 	if s.skills == nil {
 		return errors.New("skills are not enabled")
 	}
-	s.publishGlobalSkillEvent(domain.EventSkillIndexReloadRequested, skillReloadEventPayload{Actor: skill.ActorAdmin})
+	if actor == "" {
+		actor = skill.ActorUnknown
+	}
+	s.publishGlobalSkillEvent(domain.EventSkillIndexReloadRequested, skillReloadEventPayload{Actor: actor})
 	if err := s.skills.Reload(); err != nil {
 		return err
 	}
 	s.publishGlobalSkillEvent(domain.EventSkillIndexReloaded, skillReloadEventPayload{
-		Actor: skill.ActorAdmin,
+		Actor: actor,
 		Count: len(s.skills.List()),
 	})
 	return nil
@@ -154,10 +159,11 @@ func (s *RuntimeService) handleSkillReload(_ context.Context, req protocol.Clien
 			return nil, fmt.Errorf("decode skill.reload params: %w", err)
 		}
 	}
-	if err := s.requireAdmin(params.Token); err != nil {
+	principal, err := s.requireRole(params.Token, auth.RoleAdmin)
+	if err != nil {
 		return nil, err
 	}
-	if err := s.ReloadSkills(); err != nil {
+	if err := s.ReloadSkills(principal.Name); err != nil {
 		return nil, fmt.Errorf("reload skills: %w", err)
 	}
 	return marshalPayload(protocol.SkillReloadPayload{Count: len(s.ListSkills().Skills)})

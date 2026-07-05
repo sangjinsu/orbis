@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/sangjinsu/orbis/internal/auth"
 	"github.com/sangjinsu/orbis/internal/broker"
 	"github.com/sangjinsu/orbis/internal/config"
 	"github.com/sangjinsu/orbis/internal/gateway"
@@ -95,6 +96,7 @@ func NewHTTPServer(cfg config.Config) (*http.Server, *RuntimeService, error) {
 		toolNames = append(toolNames, s.Name)
 	}
 
+	authenticator := auth.New(cfg.AuthTokens)
 	runtime := NewRuntimeService(RuntimeServiceConfig{
 		Store:            fileStore,
 		Broker:           eventBroker,
@@ -106,7 +108,7 @@ func NewHTTPServer(cfg config.Config) (*http.Server, *RuntimeService, error) {
 		ProposalStore:    proposalStore,
 		AuditLog:         auditLog,
 		Promoter:         promoter,
-		AdminToken:       cfg.AdminToken,
+		Authenticator:    authenticator,
 		SkillAutoPropose: cfg.SkillAutoPropose,
 		ReducerConfig: orbisruntime.ReducerConfig{
 			ToolTimeout:               cfg.ToolTimeoutDefault,
@@ -125,7 +127,7 @@ func NewHTTPServer(cfg config.Config) (*http.Server, *RuntimeService, error) {
 	handlerOpts := []gateway.HandlerOption{
 		gateway.WithBroker(eventBroker),
 		gateway.WithReadTimeout(cfg.WSReadTimeout),
-		gateway.WithAdmin(cfg.AdminToken),
+		gateway.WithAuth(authenticator),
 	}
 	// Expose the read-only skill HTTP endpoints only when skills are enabled, so
 	// /skills 404s in a skills-disabled deployment.
