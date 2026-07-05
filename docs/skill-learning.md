@@ -126,8 +126,19 @@ WebSocket subscribers of the source run's session observe the lifecycle:
 - Rejection: `SkillProposalRejected` → `SkillAuditRecorded`
 - Promotion failure: `SkillPromotionFailed` → `SkillAuditRecorded`
 
-Payloads carry metadata only (`proposal_id`, `skill_id`, `status`, `reason`,
-`error`) — never proposal bodies.
+Payloads carry metadata only (`proposal_id`, `skill_id`, `status`, `version`,
+`reason`, `error`) — never proposal bodies.
+
+**Global feed (v2.1):** the same lifecycle events also fan out to a
+session-independent feed, so a reviewer does not need to know which run a
+proposal came from. Subscribe with `session.subscribe` and
+`{"scope": "global"}` (no `session_id`). The feed is a live stream: events are
+persisted only on the source run's session, and missed global events are
+recovered through `GET /skill-proposals`, not replay. The standalone reload
+(`POST /skills/reload`, WS `skill.reload`) — previously silent — now emits
+`SkillIndexReloadRequested` → `SkillIndexReloaded` on the global feed only
+(payload: `actor`, `count`), since it has no session; the approve flow's
+reload events stay on the source session and the global feed as before.
 
 ## HTTP endpoints
 
@@ -216,8 +227,8 @@ Then inspect `data/skill_proposals/`, `data/skills/index.json`, and
 
 - Proposal bodies are deterministic templates rendered from run data; there is
   no LLM authoring (reviewer edits of the structured fields landed in v2.1).
-- Lifecycle events are scoped to the source run's session; the standalone
-  `/skills/reload` emits no events.
+- Lifecycle events are persisted on the source run's session only; the global
+  feed (v2.1) is a live stream without persistence or replay.
 - The admin token is a single static bearer for local development, not a full
   auth system.
 

@@ -113,6 +113,84 @@ func TestWebSocketSubscribeReceivesRuntimeEvents(t *testing.T) {
 	}
 }
 
+func TestWebSocketSubscribeGlobalScope(t *testing.T) {
+	runtime := &recordingRuntime{}
+	broker := newRecordingBroker()
+	server := httptest.NewServer(NewHTTPHandler(runtime, WithBroker(broker)))
+	defer server.Close()
+
+	ctx := context.Background()
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.CloseNow()
+
+	// A global-scope subscription needs no session_id.
+	if err := wsjson.Write(ctx, conn, protocol.ClientRequest{
+		Type: "req", ID: "req_gsub", Method: "session.subscribe",
+		Params: json.RawMessage(`{"scope":"global"}`),
+	}); err != nil {
+		t.Fatalf("write subscribe: %v", err)
+	}
+	var res protocol.ServerResponse
+	if err := wsjson.Read(ctx, conn, &res); err != nil || !res.OK {
+		t.Fatalf("global subscribe response = %#v, %v; want ok", res, err)
+	}
+
+	// A global event has no session and no sequence: it is a live feed only.
+	broker.publishGlobal(protocol.RuntimeEvent{
+		Type:    "event",
+		Event:   "SkillIndexReloaded",
+		Payload: json.RawMessage(`{"actor":"admin","count":3}`),
+	})
+	var event protocol.RuntimeEvent
+	if err := wsjson.Read(ctx, conn, &event); err != nil {
+		t.Fatalf("read global event: %v", err)
+	}
+	if event.Event != "SkillIndexReloaded" || event.SessionID != "" || event.Seq != 0 {
+		t.Fatalf("event = %#v, want sessionless SkillIndexReloaded", event)
+	}
+}
+
+func TestWebSocketSubscribeRejectsUnknownScopeAndMissingSession(t *testing.T) {
+	runtime := &recordingRuntime{}
+	server := httptest.NewServer(NewHTTPHandler(runtime, WithBroker(newRecordingBroker())))
+	defer server.Close()
+
+	ctx := context.Background()
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.CloseNow()
+
+	for _, tc := range []struct {
+		id     string
+		params string
+		want   string
+	}{
+		{"req_noscope", `{}`, "session_id is required"},
+		{"req_badscope", `{"scope":"everything"}`, "unknown scope"},
+	} {
+		if err := wsjson.Write(ctx, conn, protocol.ClientRequest{
+			Type: "req", ID: tc.id, Method: "session.subscribe",
+			Params: json.RawMessage(tc.params),
+		}); err != nil {
+			t.Fatalf("write subscribe %s: %v", tc.id, err)
+		}
+		var res protocol.ServerResponse
+		if err := wsjson.Read(ctx, conn, &res); err != nil {
+			t.Fatalf("read response %s: %v", tc.id, err)
+		}
+		if res.OK || !strings.Contains(res.Error, tc.want) {
+			t.Fatalf("%s response = %#v, want error containing %q", tc.id, res, tc.want)
+		}
+	}
+}
+
 type recordingRuntime struct {
 	seen    protocol.ClientRequest
 	payload json.RawMessage
@@ -126,10 +204,14 @@ func (r *recordingRuntime) HandleClientRequest(ctx context.Context, req protocol
 
 type recordingBroker struct {
 	events chan protocol.RuntimeEvent
+	global chan protocol.RuntimeEvent
 }
 
 func newRecordingBroker() *recordingBroker {
-	return &recordingBroker{events: make(chan protocol.RuntimeEvent, 1)}
+	return &recordingBroker{
+		events: make(chan protocol.RuntimeEvent, 1),
+		global: make(chan protocol.RuntimeEvent, 1),
+	}
 }
 
 func (b *recordingBroker) Subscribe(ctx context.Context, sessionID string) (<-chan protocol.RuntimeEvent, func()) {
@@ -138,6 +220,15 @@ func (b *recordingBroker) Subscribe(ctx context.Context, sessionID string) (<-ch
 	return b.events, func() {}
 }
 
+func (b *recordingBroker) SubscribeGlobal(ctx context.Context) (<-chan protocol.RuntimeEvent, func()) {
+	_ = ctx
+	return b.global, func() {}
+}
+
 func (b *recordingBroker) publish(event protocol.RuntimeEvent) {
 	b.events <- event
+}
+
+func (b *recordingBroker) publishGlobal(event protocol.RuntimeEvent) {
+	b.global <- event
 }

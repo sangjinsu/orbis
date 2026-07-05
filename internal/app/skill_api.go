@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/sangjinsu/orbis/internal/domain"
 	"github.com/sangjinsu/orbis/internal/protocol"
 	"github.com/sangjinsu/orbis/internal/skill"
 )
@@ -73,13 +74,50 @@ func (s *RuntimeService) GetSkill(id string) (protocol.SkillDetailPayload, bool)
 	}, true
 }
 
+// skillReloadEventPayload is the metadata payload of the global reload events
+// emitted by the standalone reload endpoint. Actor identifies who asked
+// ("admin" until named principals land); Count is the reloaded skill count.
+type skillReloadEventPayload struct {
+	Actor string `json:"actor"`
+	Count int    `json:"count,omitempty"`
+}
+
 // ReloadSkills re-reads the skill index and bodies from disk. It errors when
-// skills are disabled so the caller can surface a clear failure.
+// skills are disabled so the caller can surface a clear failure. The
+// standalone reload has no session, so its SkillIndexReloadRequested /
+// SkillIndexReloaded events go to the global feed only (the approve flow
+// calls s.skills.Reload() directly and emits session-scoped events itself).
 func (s *RuntimeService) ReloadSkills() error {
 	if s.skills == nil {
 		return errors.New("skills are not enabled")
 	}
-	return s.skills.Reload()
+	s.publishGlobalSkillEvent(domain.EventSkillIndexReloadRequested, skillReloadEventPayload{Actor: skill.ActorAdmin})
+	if err := s.skills.Reload(); err != nil {
+		return err
+	}
+	s.publishGlobalSkillEvent(domain.EventSkillIndexReloaded, skillReloadEventPayload{
+		Actor: skill.ActorAdmin,
+		Count: len(s.skills.List()),
+	})
+	return nil
+}
+
+// publishGlobalSkillEvent emits one global-only wire event: no session, no
+// sequence, not persisted — a live administrative signal. The payloads are
+// fixed structs, so the marshal cannot fail in practice.
+func (s *RuntimeService) publishGlobalSkillEvent(typ domain.EventType, payload any) {
+	if s.broker == nil {
+		return
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	s.broker.PublishGlobal(protocol.RuntimeEvent{
+		Type:    "event",
+		Event:   string(typ),
+		Payload: encoded,
+	})
 }
 
 func (s *RuntimeService) handleSkillList(_ context.Context, _ protocol.ClientRequest) (json.RawMessage, error) {

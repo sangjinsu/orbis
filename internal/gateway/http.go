@@ -18,6 +18,7 @@ type Runtime interface {
 
 type Broker interface {
 	Subscribe(ctx context.Context, sessionID string) (<-chan protocol.RuntimeEvent, func())
+	SubscribeGlobal(ctx context.Context) (<-chan protocol.RuntimeEvent, func())
 }
 
 // Skills exposes the skill catalog for read-only HTTP inspection and reload. It
@@ -285,6 +286,9 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request, runtime Runtime, br
 
 type subscribeParams struct {
 	SessionID string `json:"session_id"`
+	// Scope "global" subscribes to the session-independent feed (skill
+	// lifecycle events); empty means a session subscription.
+	Scope string `json:"scope,omitempty"`
 }
 
 func handleSubscribe(conn *websocket.Conn, writeMu *sync.Mutex, broker Broker, req protocol.ClientRequest) func() {
@@ -297,11 +301,21 @@ func handleSubscribe(conn *websocket.Conn, writeMu *sync.Mutex, broker Broker, r
 		writeResponse(conn, writeMu, protocol.ServerResponse{Type: "res", ID: req.ID, OK: false, Error: err.Error()})
 		return nil
 	}
-	if params.SessionID == "" {
-		writeResponse(conn, writeMu, protocol.ServerResponse{Type: "res", ID: req.ID, OK: false, Error: "session_id is required"})
+	var events <-chan protocol.RuntimeEvent
+	var unsubscribe func()
+	switch params.Scope {
+	case "global":
+		events, unsubscribe = broker.SubscribeGlobal(context.Background())
+	case "":
+		if params.SessionID == "" {
+			writeResponse(conn, writeMu, protocol.ServerResponse{Type: "res", ID: req.ID, OK: false, Error: "session_id is required"})
+			return nil
+		}
+		events, unsubscribe = broker.Subscribe(context.Background(), params.SessionID)
+	default:
+		writeResponse(conn, writeMu, protocol.ServerResponse{Type: "res", ID: req.ID, OK: false, Error: "unknown scope: " + params.Scope})
 		return nil
 	}
-	events, unsubscribe := broker.Subscribe(context.Background(), params.SessionID)
 	writeResponse(conn, writeMu, protocol.ServerResponse{Type: "res", ID: req.ID, OK: true, Payload: json.RawMessage(`{}`)})
 	go func() {
 		for event := range events {

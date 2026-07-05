@@ -73,6 +73,25 @@ Creates a session snapshot and emits `SessionCreated`.
 }
 ```
 
+### `session.subscribe`
+
+Streams runtime events. With a `session_id` it delivers that session's
+sequenced events. With `"scope": "global"` (v2.1) it delivers the
+session-independent feed instead: skill-learning lifecycle events, including
+the standalone reload's `SkillIndexReloadRequested`/`SkillIndexReloaded`.
+Global-only events carry no `session_id` and `seq` 0 — the feed is live and
+non-persisted; missed events are recovered through the read APIs. Any other
+scope value is an error.
+
+```json
+{
+  "type": "req",
+  "id": "sub_001",
+  "method": "session.subscribe",
+  "params": { "scope": "global" }
+}
+```
+
 ### `run.status`
 
 Returns the latest run snapshot.
