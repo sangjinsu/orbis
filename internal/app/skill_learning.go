@@ -22,6 +22,7 @@ type skillLearningEventPayload struct {
 	ProposalID string `json:"proposal_id"`
 	SkillID    string `json:"skill_id,omitempty"`
 	Status     string `json:"status,omitempty"`
+	Version    string `json:"version,omitempty"`
 	Reason     string `json:"reason,omitempty"`
 	Error      string `json:"error,omitempty"`
 }
@@ -301,7 +302,7 @@ func (s *RuntimeService) approveSkillProposal(ctx context.Context, proposalID, a
 		return skill.SkillProposal{}, err
 	}
 	if err := s.emitSkillLearningEvent(ctx, sessionID, proposal.SourceRunID, proposal.SourceRunID+":skill_promoted", domain.EventSkillPromoted, skillLearningEventPayload{
-		ProposalID: proposal.ProposalID, SkillID: meta.ID, Status: string(proposal.Status),
+		ProposalID: proposal.ProposalID, SkillID: meta.ID, Status: string(proposal.Status), Version: meta.Version,
 	}); err != nil {
 		return skill.SkillProposal{}, err
 	}

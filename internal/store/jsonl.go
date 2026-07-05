@@ -119,16 +119,39 @@ func (s *FileStore) SaveRun(ctx context.Context, state domain.RunState) error {
 	return writeJSON(filepath.Join(s.root, "runs", state.RunID+".json"), state)
 }
 
+// writeJSON replaces a snapshot atomically: it writes a temp file in the same
+// directory and renames it over the target. A concurrent reader (e.g. LoadRun
+// while the session event queue persists the same run) always sees a complete
+// old or new snapshot, never the empty window of a truncate-then-write.
 func writeJSON(path string, value any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create snapshot dir: %w", err)
 	}
 	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal snapshot: %w", err)
 	}
-	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create snapshot temp file: %w", err)
+	}
+	if _, err := tmp.Write(append(data, '\n')); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
 		return fmt.Errorf("write snapshot: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmp.Name())
+		return fmt.Errorf("close snapshot temp file: %w", err)
+	}
+	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
+		_ = os.Remove(tmp.Name())
+		return fmt.Errorf("chmod snapshot temp file: %w", err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		_ = os.Remove(tmp.Name())
+		return fmt.Errorf("replace snapshot: %w", err)
 	}
 	return nil
 }

@@ -5,12 +5,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
 // ErrSkillConflict is returned when a promotion targets a skill id that already
-// exists in the active index. v2 rejects conflicts instead of creating a new
-// version; multi-version promotion is future work.
+// exists in the active index without learned provenance — a curated seed.
+// Learned skills are re-promoted in place as a new version instead.
 var ErrSkillConflict = errors.New("skill id already exists")
 
 // initialVersion is the version assigned to a newly promoted skill.
@@ -32,17 +33,14 @@ func normalizeVersion(version string) string {
 	return strings.TrimSpace(version)
 }
 
-// EnsureSkillIDAvailable checks a proposed skill id against the active index
-// snapshot and returns ErrSkillConflict when it is already taken. A nil index
-// performs no check (the caller has nothing to conflict with).
-func EnsureSkillIDAvailable(index Index, skillID string) error {
-	if index == nil {
-		return nil
+// nextVersion parses a learned skill's integer version and returns it
+// incremented. Learned skills always carry plain integer versions ("1", "2",
+// ...); anything else marks a corrupt entry, and failing loudly routes the
+// proposal through the retryable failed state instead of guessing a version.
+func nextVersion(current string) (string, error) {
+	n, err := strconv.Atoi(strings.TrimSpace(current))
+	if err != nil || n < 1 {
+		return "", fmt.Errorf("existing version %q is not a positive integer", current)
 	}
-	for _, entry := range index.Snapshot() {
-		if entry.ID == skillID {
-			return fmt.Errorf("%w: %s", ErrSkillConflict, skillID)
-		}
-	}
-	return nil
+	return strconv.Itoa(n + 1), nil
 }
