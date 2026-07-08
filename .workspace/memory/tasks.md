@@ -215,7 +215,63 @@ scoring (unit-tested).
 
 ## Post-v2 Follow-ups
 
-- v2.1: multi-version promotion; reviewer edits before approval;
-  session-independent reload events.
-- real auth to replace the static admin token.
+- done: all four items shipped in v2.1 (below) — multi-version promotion,
+  reviewer edits, session-independent lifecycle events, named-token auth.
+- v3 candidates: vector search, subagents, MCP.
+
+## v2.1: Learning Loop Hardening
+
+Four features hardening the v2 loop, one PR each, plus two latent-defect
+fixes. v2 invariants unchanged (`SkillProposalCreated != SkillPromoted`,
+reducer purity, seed protection).
+
+- PR #40 — multi-version promotion: re-promoting a learned skill id bumps the
+  integer version in place, archives the old body to
+  `data/skills/archive/{id}@{version}.md`, and refreshes the index entry.
+  Seeds (empty `source_proposal_id`) still conflict; non-integer learned
+  versions fail loudly into the retryable `failed` state. Also fixed: the
+  body-exists check that let an orphan `.md` block retries forever, and
+  non-atomic snapshot writes (`writeJSON` is now temp+rename — LoadRun could
+  read a truncated snapshot mid-persist; safe post-`Close()`, the pre-Close
+  rejection no longer applies).
+- PR #44 (recreated #41) — reviewer edits: WS `skill.proposal.update` + HTTP
+  `PATCH /skill-proposals/{id}` edit the eight body-composing fields of a
+  pending proposal; `Rerender()` re-derives Body/ContentHash via the creation
+  renderer; identity/rationale/body are immutable by wire-type construction;
+  `Revision` keys per-edit audit/event ids (`SkillProposalUpdated`).
+- PR #42 — global feed: broker `SubscribeGlobal`/`PublishGlobal`;
+  `RuntimeService.publish` fans the 11 skill-learning event types out
+  globally (whitelist in app); subscribe via `session.subscribe`
+  `scope:"global"`. The standalone reload (previously silent) emits
+  global-only Requested/Reloaded with `{actor, count}`. Live-only feed;
+  read-open by conscious decision.
+- PR #43 — named-token auth: `ORBIS_AUTH_TOKENS=name:role:token,...`, roles
+  `reviewer`/`admin`, `internal/auth` leaf package, constant-time
+  no-early-return matching, explicit `actor` params → audit shows who
+  approved what. No tokens ⇒ disabled 403 / unknown ⇒ 401 / wrong role ⇒
+  403; reads open. `ORBIS_ADMIN_TOKEN` merges as admin "admin";
+  collisions fail config loading.
+- Specs: `.spec/v2.1-learning-loop-hardening.md`,
+  `decisions/v2.1-decisions.md`, `docs/skill-learning.md`. Config:
+  `ORBIS_AUTH_TOKENS` (legacy `ORBIS_ADMIN_TOKEN` merged).
+
+## v2.1 Status
+
+Completed on 2026-07-08 (PRs #40, #44, #42, #43 merged to `main`; #44
+recreated #41 after a stacked-merge branch deletion closed it — retarget
+children before deleting a parent branch).
+
+Fresh main verification: `gofmt -l .`, `go vet ./...`, `go test ./...
+-count=1`, `go test -race ./...`, `git diff --check` all green. Real-LLM
+combined acceptance on `:18080`: smoke tool run → 401 matrix → reviewer (bob)
+created/edited (revision 1, body re-rendered)/approved ⇒ promoted v1 →
+same-id re-approval ⇒ promoted v2 + `archive/{id}@1.md` + reloaded catalog
+served the revised body → reload matrix bob 403 / alice 200 / legacy token
+200 → audit actors recorded `bob`. See `history.md` for the full record.
+
+## Post-v2.1 Follow-ups
+
+- consider reviewer-gating the global feed if payloads grow beyond metadata.
+- token rotation/expiry or an external IdP when static tokens fall short.
+- v2.2 candidates: multi-entry version history; proposal deletion/expiry.
 - v3 candidates: vector search, subagents, MCP.
