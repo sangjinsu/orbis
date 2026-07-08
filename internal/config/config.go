@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sangjinsu/orbis/internal/auth"
 )
 
 type Config struct {
@@ -48,11 +50,13 @@ type Config struct {
 
 	// Skill learning (v2). The runtime may create reviewable skill proposals
 	// from runs; promotion always requires human approval (never automatic).
-	// AdminToken guards mutating endpoints — empty leaves them disabled.
+	// AuthTokens guards mutating endpoints — empty leaves them disabled. It is
+	// parsed from ORBIS_AUTH_TOKENS (name:role:token, comma-separated); the
+	// legacy ORBIS_ADMIN_TOKEN is merged in as the admin-role token "admin".
 	SkillLearningEnabled bool
 	SkillProposalsDir    string
 	SkillAuditPath       string
-	AdminToken           string
+	AuthTokens           []auth.TokenEntry
 	SkillAutoPropose     bool
 }
 
@@ -139,6 +143,10 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	authTokens, err := loadAuthTokens(values)
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg := Config{
 		Addr:          valueOrDefault(values, "ORBIS_ADDR", ":8080"),
@@ -170,7 +178,7 @@ func Load(path string) (Config, error) {
 		SkillLearningEnabled: skillLearningEnabled,
 		SkillProposalsDir:    valueOrDefault(values, "ORBIS_SKILL_PROPOSALS_DIR", "data/skill_proposals"),
 		SkillAuditPath:       valueOrDefault(values, "ORBIS_SKILL_AUDIT_PATH", "data/audit/skill_audit.jsonl"),
-		AdminToken:           strings.TrimSpace(values["ORBIS_ADMIN_TOKEN"]),
+		AuthTokens:           authTokens,
 		SkillAutoPropose:     skillAutoPropose,
 	}
 
@@ -178,6 +186,30 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// loadAuthTokens parses ORBIS_AUTH_TOKENS and merges the legacy
+// ORBIS_ADMIN_TOKEN as an admin-role entry named "admin". A name collision
+// with a configured "admin" entry fails loudly rather than silently shadowing
+// either token.
+func loadAuthTokens(values map[string]string) ([]auth.TokenEntry, error) {
+	entries, err := auth.ParseTokens(values["ORBIS_AUTH_TOKENS"])
+	if err != nil {
+		return nil, err
+	}
+	legacy := strings.TrimSpace(values["ORBIS_ADMIN_TOKEN"])
+	if legacy == "" {
+		return entries, nil
+	}
+	for _, entry := range entries {
+		if entry.Name == "admin" {
+			return nil, errors.New("ORBIS_ADMIN_TOKEN conflicts with an ORBIS_AUTH_TOKENS entry named \"admin\"; drop one of them")
+		}
+		if entry.Token == legacy {
+			return nil, errors.New("ORBIS_ADMIN_TOKEN duplicates a token in ORBIS_AUTH_TOKENS; drop one of them")
+		}
+	}
+	return append(entries, auth.TokenEntry{Name: "admin", Role: auth.RoleAdmin, Token: legacy}), nil
 }
 
 func (c Config) Validate() error {

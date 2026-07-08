@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sangjinsu/orbis/internal/auth"
 	"github.com/sangjinsu/orbis/internal/domain"
 	"github.com/sangjinsu/orbis/internal/protocol"
 	"github.com/sangjinsu/orbis/internal/skill"
@@ -139,22 +140,25 @@ func (s *RuntimeService) emitSkillLearningEvent(ctx context.Context, sessionID, 
 	})
 }
 
-// Admin protection for mutating skill-learning operations. With no token
-// configured the mutating endpoints are disabled entirely (the safe default);
-// read endpoints stay open.
-var (
-	errAdminDisabled     = errors.New("admin endpoints are disabled: ORBIS_ADMIN_TOKEN is not configured")
-	errInvalidAdminToken = errors.New("invalid admin token")
-)
+// errRoleForbidden is returned when a valid token lacks the required role.
+var errRoleForbidden = errors.New("insufficient role for this operation")
 
-func (s *RuntimeService) requireAdmin(token string) error {
-	if s.adminToken == "" {
-		return errAdminDisabled
+// requireRole gates a mutating WS operation: with no tokens configured the
+// operation is disabled entirely (the safe default), an unknown token is
+// rejected, and a known token must carry the required role. The returned
+// principal's name becomes the audit actor.
+func (s *RuntimeService) requireRole(token string, required auth.Role) (auth.Principal, error) {
+	if s.auth == nil || !s.auth.Enabled() {
+		return auth.Principal{}, auth.ErrDisabled
 	}
-	if token != s.adminToken {
-		return errInvalidAdminToken
+	principal, err := s.auth.Authenticate(token)
+	if err != nil {
+		return auth.Principal{}, err
 	}
-	return nil
+	if !principal.Allows(required) {
+		return auth.Principal{}, fmt.Errorf("%w: %s needs %s", errRoleForbidden, principal.Name, required)
+	}
+	return principal, nil
 }
 
 // proposalSummary maps a stored proposal to its wire summary.
@@ -223,10 +227,11 @@ func (s *RuntimeService) GetSkillProposal(id string) (protocol.SkillProposalDeta
 	return proposalDetail(p), true, nil
 }
 
-// CreateSkillProposal creates a proposal from a run for an admin-authenticated
-// caller (gateway HTTP / WS after the token check).
-func (s *RuntimeService) CreateSkillProposal(ctx context.Context, runID string) (protocol.SkillProposalDetailPayload, error) {
-	p, err := s.CreateSkillProposalFromRun(ctx, runID, skill.ActorAdmin, true)
+// CreateSkillProposal creates a proposal from a run for an authenticated
+// caller; actor is the authenticated principal's name, recorded in the audit
+// trail (gateway HTTP / WS after the token check).
+func (s *RuntimeService) CreateSkillProposal(ctx context.Context, runID, actor string) (protocol.SkillProposalDetailPayload, error) {
+	p, err := s.CreateSkillProposalFromRun(ctx, runID, actor, true)
 	if err != nil {
 		return protocol.SkillProposalDetailPayload{}, err
 	}
@@ -234,9 +239,9 @@ func (s *RuntimeService) CreateSkillProposal(ctx context.Context, runID string) 
 }
 
 // UpdateSkillProposal applies a reviewer's structured-field edit for an
-// admin-authenticated caller.
-func (s *RuntimeService) UpdateSkillProposal(ctx context.Context, id string, fields protocol.SkillProposalUpdateRequest) (protocol.SkillProposalDetailPayload, error) {
-	p, err := s.updateSkillProposal(ctx, id, fields, skill.ActorAdmin)
+// authenticated caller.
+func (s *RuntimeService) UpdateSkillProposal(ctx context.Context, id string, fields protocol.SkillProposalUpdateRequest, actor string) (protocol.SkillProposalDetailPayload, error) {
+	p, err := s.updateSkillProposal(ctx, id, fields, actor)
 	if err != nil {
 		return protocol.SkillProposalDetailPayload{}, err
 	}
@@ -244,8 +249,8 @@ func (s *RuntimeService) UpdateSkillProposal(ctx context.Context, id string, fie
 }
 
 // ApproveSkillProposal approves and promotes a pending proposal.
-func (s *RuntimeService) ApproveSkillProposal(ctx context.Context, id string) (protocol.SkillProposalDetailPayload, error) {
-	p, err := s.approveSkillProposal(ctx, id, skill.ActorAdmin)
+func (s *RuntimeService) ApproveSkillProposal(ctx context.Context, id, actor string) (protocol.SkillProposalDetailPayload, error) {
+	p, err := s.approveSkillProposal(ctx, id, actor)
 	if err != nil {
 		return protocol.SkillProposalDetailPayload{}, err
 	}
@@ -253,8 +258,8 @@ func (s *RuntimeService) ApproveSkillProposal(ctx context.Context, id string) (p
 }
 
 // RejectSkillProposal rejects a pending proposal.
-func (s *RuntimeService) RejectSkillProposal(ctx context.Context, id, reason string) (protocol.SkillProposalDetailPayload, error) {
-	p, err := s.rejectSkillProposal(ctx, id, skill.ActorAdmin, reason)
+func (s *RuntimeService) RejectSkillProposal(ctx context.Context, id, reason, actor string) (protocol.SkillProposalDetailPayload, error) {
+	p, err := s.rejectSkillProposal(ctx, id, actor, reason)
 	if err != nil {
 		return protocol.SkillProposalDetailPayload{}, err
 	}
@@ -586,13 +591,14 @@ func (s *RuntimeService) handleSkillProposalCreate(ctx context.Context, req prot
 			return nil, fmt.Errorf("decode skill.proposal.create_from_run params: %w", err)
 		}
 	}
-	if err := s.requireAdmin(params.Token); err != nil {
+	principal, err := s.requireRole(params.Token, auth.RoleReviewer)
+	if err != nil {
 		return nil, err
 	}
 	if params.RunID == "" {
 		return nil, fmt.Errorf("run_id is required")
 	}
-	detail, err := s.CreateSkillProposal(ctx, params.RunID)
+	detail, err := s.CreateSkillProposal(ctx, params.RunID, principal.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -606,13 +612,14 @@ func (s *RuntimeService) handleSkillProposalUpdate(ctx context.Context, req prot
 			return nil, fmt.Errorf("decode skill.proposal.update params: %w", err)
 		}
 	}
-	if err := s.requireAdmin(params.Token); err != nil {
+	principal, err := s.requireRole(params.Token, auth.RoleReviewer)
+	if err != nil {
 		return nil, err
 	}
 	if params.ProposalID == "" {
 		return nil, fmt.Errorf("proposal_id is required")
 	}
-	detail, err := s.UpdateSkillProposal(ctx, params.ProposalID, params.SkillProposalUpdateRequest)
+	detail, err := s.UpdateSkillProposal(ctx, params.ProposalID, params.SkillProposalUpdateRequest, principal.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -626,13 +633,14 @@ func (s *RuntimeService) handleSkillProposalApprove(ctx context.Context, req pro
 			return nil, fmt.Errorf("decode skill.proposal.approve params: %w", err)
 		}
 	}
-	if err := s.requireAdmin(params.Token); err != nil {
+	principal, err := s.requireRole(params.Token, auth.RoleReviewer)
+	if err != nil {
 		return nil, err
 	}
 	if params.ProposalID == "" {
 		return nil, fmt.Errorf("proposal_id is required")
 	}
-	detail, err := s.ApproveSkillProposal(ctx, params.ProposalID)
+	detail, err := s.ApproveSkillProposal(ctx, params.ProposalID, principal.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -646,13 +654,14 @@ func (s *RuntimeService) handleSkillProposalReject(ctx context.Context, req prot
 			return nil, fmt.Errorf("decode skill.proposal.reject params: %w", err)
 		}
 	}
-	if err := s.requireAdmin(params.Token); err != nil {
+	principal, err := s.requireRole(params.Token, auth.RoleReviewer)
+	if err != nil {
 		return nil, err
 	}
 	if params.ProposalID == "" {
 		return nil, fmt.Errorf("proposal_id is required")
 	}
-	detail, err := s.RejectSkillProposal(ctx, params.ProposalID, params.Reason)
+	detail, err := s.RejectSkillProposal(ctx, params.ProposalID, params.Reason, principal.Name)
 	if err != nil {
 		return nil, err
 	}

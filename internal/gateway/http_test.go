@@ -10,12 +10,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sangjinsu/orbis/internal/auth"
 	"github.com/sangjinsu/orbis/internal/protocol"
 )
+
+// testGatewayAuth configures an admin token "tok" (name alice) and a reviewer
+// token "rev-tok" (name bob) for the endpoint role matrices.
+func testGatewayAuth() *auth.Authenticator {
+	return auth.New([]auth.TokenEntry{
+		{Name: "alice", Role: auth.RoleAdmin, Token: "tok"},
+		{Name: "bob", Role: auth.RoleReviewer, Token: "rev-tok"},
+	})
+}
 
 var errSkillReload = errors.New("reload failed")
 
 type recordingSkills struct {
+	lastActor   string
 	list        protocol.SkillListPayload
 	detail      map[string]protocol.SkillDetailPayload
 	reloadCount int
@@ -29,7 +40,8 @@ func (s *recordingSkills) GetSkill(id string) (protocol.SkillDetailPayload, bool
 	return detail, ok
 }
 
-func (s *recordingSkills) ReloadSkills() error {
+func (s *recordingSkills) ReloadSkills(actor string) error {
+	s.lastActor = actor
 	s.reloadCount++
 	return s.reloadErr
 }
@@ -146,7 +158,7 @@ func TestHTTPSkillsEndpoints(t *testing.T) {
 	})
 
 	t.Run("reload with admin token", func(t *testing.T) {
-		adminHandler := NewHTTPHandler(&recordingRuntime{}, WithSkills(skills), WithAdmin("tok"))
+		adminHandler := NewHTTPHandler(&recordingRuntime{}, WithSkills(skills), WithAuth(testGatewayAuth()))
 
 		rec := httptest.NewRecorder()
 		wrong := httptest.NewRequest(http.MethodPost, "/skills/reload", nil)
@@ -178,7 +190,7 @@ func TestHTTPSkillsEndpoints(t *testing.T) {
 
 func TestHTTPSkillsReloadErrorReturns500(t *testing.T) {
 	skills := &recordingSkills{reloadErr: errSkillReload}
-	handler := NewHTTPHandler(&recordingRuntime{}, WithSkills(skills), WithAdmin("tok"))
+	handler := NewHTTPHandler(&recordingRuntime{}, WithSkills(skills), WithAuth(testGatewayAuth()))
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/skills/reload", nil)
 	req.Header.Set("Authorization", "Bearer tok")
@@ -202,6 +214,7 @@ type recordingSkillLearning struct {
 	detail     map[string]protocol.SkillProposalDetailPayload
 	lastStatus string
 	lastReason string
+	lastActor  string
 	created    []string
 	updated    []string
 	lastUpdate protocol.SkillProposalUpdateRequest
@@ -219,25 +232,29 @@ func (l *recordingSkillLearning) GetSkillProposal(id string) (protocol.SkillProp
 	return detail, ok, nil
 }
 
-func (l *recordingSkillLearning) CreateSkillProposal(_ context.Context, runID string) (protocol.SkillProposalDetailPayload, error) {
+func (l *recordingSkillLearning) CreateSkillProposal(_ context.Context, runID, actor string) (protocol.SkillProposalDetailPayload, error) {
 	l.created = append(l.created, runID)
+	l.lastActor = actor
 	return protocol.SkillProposalDetailPayload{SkillProposalSummary: protocol.SkillProposalSummary{ProposalID: "prop_" + runID, Status: "pending"}}, nil
 }
 
-func (l *recordingSkillLearning) UpdateSkillProposal(_ context.Context, id string, fields protocol.SkillProposalUpdateRequest) (protocol.SkillProposalDetailPayload, error) {
+func (l *recordingSkillLearning) UpdateSkillProposal(_ context.Context, id string, fields protocol.SkillProposalUpdateRequest, actor string) (protocol.SkillProposalDetailPayload, error) {
 	l.updated = append(l.updated, id)
 	l.lastUpdate = fields
+	l.lastActor = actor
 	return protocol.SkillProposalDetailPayload{SkillProposalSummary: protocol.SkillProposalSummary{ProposalID: id, Status: "pending", Revision: 1}}, nil
 }
 
-func (l *recordingSkillLearning) ApproveSkillProposal(_ context.Context, id string) (protocol.SkillProposalDetailPayload, error) {
+func (l *recordingSkillLearning) ApproveSkillProposal(_ context.Context, id, actor string) (protocol.SkillProposalDetailPayload, error) {
 	l.approved = append(l.approved, id)
+	l.lastActor = actor
 	return protocol.SkillProposalDetailPayload{SkillProposalSummary: protocol.SkillProposalSummary{ProposalID: id, Status: "promoted"}}, nil
 }
 
-func (l *recordingSkillLearning) RejectSkillProposal(_ context.Context, id, reason string) (protocol.SkillProposalDetailPayload, error) {
+func (l *recordingSkillLearning) RejectSkillProposal(_ context.Context, id, reason, actor string) (protocol.SkillProposalDetailPayload, error) {
 	l.rejected = append(l.rejected, id)
 	l.lastReason = reason
+	l.lastActor = actor
 	return protocol.SkillProposalDetailPayload{SkillProposalSummary: protocol.SkillProposalSummary{ProposalID: id, Status: "rejected"}}, nil
 }
 
@@ -248,7 +265,7 @@ func TestHTTPSkillProposalEndpoints(t *testing.T) {
 			"prop_1": {SkillProposalSummary: protocol.SkillProposalSummary{ProposalID: "prop_1", Status: "pending"}, Body: "BODY"},
 		},
 	}
-	handler := NewHTTPHandler(&recordingRuntime{}, WithSkillLearning(learning), WithAdmin("tok"))
+	handler := NewHTTPHandler(&recordingRuntime{}, WithSkillLearning(learning), WithAuth(testGatewayAuth()))
 	admin := func(method, path, body string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
 		var req *http.Request
@@ -338,12 +355,48 @@ func TestHTTPSkillProposalEndpoints(t *testing.T) {
 		if len(learning.approved) != 1 || learning.approved[0] != "prop_1" {
 			t.Fatalf("approved = %v, want [prop_1]", learning.approved)
 		}
+		if learning.lastActor != "alice" {
+			t.Fatalf("approve actor = %q, want the admin token's name alice", learning.lastActor)
+		}
 		rec = admin(http.MethodPost, "/skill-proposals/prop_2/reject", `{"reason":"too narrow"}`)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("reject status = %d, want 200", rec.Code)
 		}
 		if learning.lastReason != "too narrow" {
 			t.Fatalf("reject reason = %q, want too narrow", learning.lastReason)
+		}
+	})
+
+	t.Run("reviewer role covers proposals but not reload", func(t *testing.T) {
+		reviewer := func(method, path string) *httptest.ResponseRecorder {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(method, path, nil)
+			req.Header.Set("Authorization", "Bearer rev-tok")
+			handler.ServeHTTP(rec, req)
+			return rec
+		}
+		if rec := reviewer(http.MethodPost, "/skill-proposals/prop_1/approve"); rec.Code != http.StatusOK {
+			t.Fatalf("reviewer approve status = %d, want 200", rec.Code)
+		}
+		if learning.lastActor != "bob" {
+			t.Fatalf("reviewer actor = %q, want bob", learning.lastActor)
+		}
+		// The reload route is admin-only; register it on a handler that has both.
+		skills := &recordingSkills{}
+		both := NewHTTPHandler(&recordingRuntime{}, WithSkills(skills), WithSkillLearning(learning), WithAuth(testGatewayAuth()))
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/skills/reload", nil)
+		req.Header.Set("Authorization", "Bearer rev-tok")
+		both.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("reviewer reload status = %d, want 403", rec.Code)
+		}
+		rec = httptest.NewRecorder()
+		req = httptest.NewRequest(http.MethodPost, "/skills/reload", nil)
+		req.Header.Set("Authorization", "Bearer tok")
+		both.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || skills.lastActor != "alice" {
+			t.Fatalf("admin reload = %d (actor %q), want 200 by alice", rec.Code, skills.lastActor)
 		}
 	})
 }

@@ -186,24 +186,40 @@ proposal's `revision`, appends a revision-keyed audit record naming the edited
 fields, and emits `SkillProposalUpdated`. Only pending proposals can be
 edited — approved, rejected, promoted, and failed proposals are immutable.
 
-## Admin protection
+## Authentication (v2.1: named tokens + roles)
 
-Mutating operations require the static admin token:
+Mutating operations require a named bearer token with a sufficient role:
 
-- HTTP: `Authorization: Bearer <ORBIS_ADMIN_TOKEN>`; WS: `token` in params.
-- **With no token configured (the default), mutating endpoints are disabled
+```
+ORBIS_AUTH_TOKENS=alice:admin:atok,bob:reviewer:rtok
+```
+
+- Each entry is `name:role:token` (comma-separated; the token part may contain
+  `:` but not `,`). Names and tokens must be unique.
+- Roles: `reviewer` covers the proposal review flow (create_from_run, update,
+  approve, reject); `admin` covers everything plus `skills reload`.
+- The token's **name** is recorded as the audit `actor` and in the global
+  reload event payload, so the trail shows who approved what.
+- HTTP: `Authorization: Bearer <token>`; WS: `token` in each request's params.
+- **With no tokens configured (the default), mutating endpoints are disabled
   entirely** — 403 over HTTP, a clear error over WS. Reads stay open.
-- A wrong token is 401 / an `invalid admin token` error.
-- This also applies to the previously open v1 skills reload.
+- An unknown token is 401; a valid token without the required role is 403.
+- Tokens are compared in constant time without early return, so response
+  timing does not reveal which entry matched.
 
-For local development set `ORBIS_ADMIN_TOKEN=dev-orbis-admin`.
+The legacy `ORBIS_ADMIN_TOKEN` still works: it is merged in as an admin-role
+token named `admin`. Setting both is fine unless the name `admin` or the token
+value collides — that fails config loading loudly. For local development set
+`ORBIS_ADMIN_TOKEN=dev-orbis-admin` or a full `ORBIS_AUTH_TOKENS`.
 
 ## Configuration
 
 - `ORBIS_SKILL_LEARNING_ENABLED` (default `true`) — disables the whole loop.
 - `ORBIS_SKILL_PROPOSALS_DIR` (default `data/skill_proposals`)
 - `ORBIS_SKILL_AUDIT_PATH` (default `data/audit/skill_audit.jsonl`)
-- `ORBIS_ADMIN_TOKEN` (default empty = mutating endpoints disabled)
+- `ORBIS_AUTH_TOKENS` (default empty; `name:role:token` entries)
+- `ORBIS_ADMIN_TOKEN` (legacy; merged as admin token named `admin`. Both empty
+  = mutating endpoints disabled)
 - `ORBIS_SKILL_AUTO_PROPOSE` (default `false`; creates pending proposals only)
 
 ## Manual test
@@ -229,8 +245,8 @@ Then inspect `data/skill_proposals/`, `data/skills/index.json`, and
   no LLM authoring (reviewer edits of the structured fields landed in v2.1).
 - Lifecycle events are persisted on the source run's session only; the global
   feed (v2.1) is a live stream without persistence or replay.
-- The admin token is a single static bearer for local development, not a full
-  auth system.
+- Tokens are static credentials configured at startup (named, with roles, as
+  of v2.1); there is no token rotation, expiry, or external identity provider.
 
 ## Non-goals
 

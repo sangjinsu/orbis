@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sangjinsu/orbis/internal/auth"
 	"github.com/sangjinsu/orbis/internal/domain"
 	"github.com/sangjinsu/orbis/internal/protocol"
 	orbisruntime "github.com/sangjinsu/orbis/internal/runtime"
@@ -28,12 +29,12 @@ type RuntimeServiceConfig struct {
 	// Skill learning (v2). A nil ProposalStore disables the learning loop.
 	// SkillAutoPropose only creates pending proposals from completed runs; it
 	// never promotes anything. Promotion additionally requires the Promoter and
-	// an explicit admin-authenticated approval; an empty AdminToken disables all
-	// mutating skill-learning operations.
+	// an explicit authenticated approval; a nil or empty Authenticator disables
+	// all mutating skill-learning operations.
 	ProposalStore    *skill.ProposalStore
 	AuditLog         *skill.AuditLog
 	Promoter         *skill.Promoter
-	AdminToken       string
+	Authenticator    *auth.Authenticator
 	SkillAutoPropose bool
 	ReducerConfig    orbisruntime.ReducerConfig
 	RunTimeout       time.Duration
@@ -60,7 +61,7 @@ type RuntimeService struct {
 	proposals   *skill.ProposalStore
 	auditLog    *skill.AuditLog
 	promoter    *skill.Promoter
-	adminToken  string
+	auth        *auth.Authenticator
 	autoPropose bool
 
 	runMu      sync.Mutex
@@ -129,7 +130,7 @@ func NewRuntimeService(cfg RuntimeServiceConfig) *RuntimeService {
 		proposals:   cfg.ProposalStore,
 		auditLog:    cfg.AuditLog,
 		promoter:    cfg.Promoter,
-		adminToken:  cfg.AdminToken,
+		auth:        cfg.Authenticator,
 		autoPropose: cfg.SkillAutoPropose,
 		activeRuns:  map[string]*runExecution{},
 		runTimeout:  cfg.RunTimeout,

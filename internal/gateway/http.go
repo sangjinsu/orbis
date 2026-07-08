@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+	"github.com/sangjinsu/orbis/internal/auth"
 	"github.com/sangjinsu/orbis/internal/protocol"
 )
 
@@ -23,22 +25,24 @@ type Broker interface {
 
 // Skills exposes the skill catalog for read-only HTTP inspection and reload. It
 // returns wire DTOs so the gateway stays decoupled from the internal store.
+// Mutating calls receive the authenticated principal's name as actor.
 type Skills interface {
 	ListSkills() protocol.SkillListPayload
 	GetSkill(id string) (protocol.SkillDetailPayload, bool)
-	ReloadSkills() error
+	ReloadSkills(actor string) error
 }
 
 // SkillLearning exposes the reviewable skill-proposal loop (v2) over HTTP. It
 // returns wire DTOs; the gateway never touches the skill package. Mutating
-// operations are only reachable through the admin gate.
+// operations are only reachable through the auth gate and receive the
+// authenticated principal's name as actor for the audit trail.
 type SkillLearning interface {
 	ListSkillProposals(status string) (protocol.SkillProposalListPayload, error)
 	GetSkillProposal(id string) (protocol.SkillProposalDetailPayload, bool, error)
-	CreateSkillProposal(ctx context.Context, runID string) (protocol.SkillProposalDetailPayload, error)
-	UpdateSkillProposal(ctx context.Context, id string, fields protocol.SkillProposalUpdateRequest) (protocol.SkillProposalDetailPayload, error)
-	ApproveSkillProposal(ctx context.Context, id string) (protocol.SkillProposalDetailPayload, error)
-	RejectSkillProposal(ctx context.Context, id, reason string) (protocol.SkillProposalDetailPayload, error)
+	CreateSkillProposal(ctx context.Context, runID, actor string) (protocol.SkillProposalDetailPayload, error)
+	UpdateSkillProposal(ctx context.Context, id string, fields protocol.SkillProposalUpdateRequest, actor string) (protocol.SkillProposalDetailPayload, error)
+	ApproveSkillProposal(ctx context.Context, id, actor string) (protocol.SkillProposalDetailPayload, error)
+	RejectSkillProposal(ctx context.Context, id, reason, actor string) (protocol.SkillProposalDetailPayload, error)
 }
 
 type HandlerOption func(*handlerConfig)
@@ -47,7 +51,7 @@ type handlerConfig struct {
 	broker      Broker
 	skills      Skills
 	learning    SkillLearning
-	adminToken  string
+	auth        *auth.Authenticator
 	readTimeout time.Duration
 }
 
@@ -74,27 +78,36 @@ func WithSkillLearning(learning SkillLearning) HandlerOption {
 	}
 }
 
-// WithAdmin sets the bearer token that guards mutating skill endpoints
-// (proposal create/approve/reject and skills reload). An empty token — the
-// default — disables those endpoints entirely instead of leaving them open.
-func WithAdmin(token string) HandlerOption {
+// WithAuth sets the authenticator that guards mutating skill endpoints
+// (proposal create/update/approve/reject and skills reload). A nil or empty
+// authenticator — the default — disables those endpoints entirely instead of
+// leaving them open.
+func WithAuth(a *auth.Authenticator) HandlerOption {
 	return func(cfg *handlerConfig) {
-		cfg.adminToken = token
+		cfg.auth = a
 	}
 }
 
-// requireAdmin gates a mutating endpoint: 403 when no token is configured
-// (endpoint disabled), 401 on a bearer mismatch.
-func requireAdmin(w http.ResponseWriter, r *http.Request, token string) bool {
-	if token == "" {
-		http.Error(w, "admin endpoints are disabled: no admin token configured", http.StatusForbidden)
-		return false
+// requireRole gates a mutating endpoint: 403 when no tokens are configured
+// (endpoint disabled), 401 on an unknown bearer token, 403 when the token's
+// role does not cover the required role. On success it returns the principal
+// whose name becomes the audit actor.
+func requireRole(w http.ResponseWriter, r *http.Request, a *auth.Authenticator, required auth.Role) (auth.Principal, bool) {
+	if a == nil || !a.Enabled() {
+		http.Error(w, "auth endpoints are disabled: no tokens configured", http.StatusForbidden)
+		return auth.Principal{}, false
 	}
-	if r.Header.Get("Authorization") != "Bearer "+token {
-		http.Error(w, "invalid admin token", http.StatusUnauthorized)
-		return false
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	principal, err := a.Authenticate(token)
+	if err != nil {
+		http.Error(w, "invalid token", http.StatusUnauthorized)
+		return auth.Principal{}, false
 	}
-	return true
+	if !principal.Allows(required) {
+		http.Error(w, "insufficient role for this operation", http.StatusForbidden)
+		return auth.Principal{}, false
+	}
+	return principal, true
 }
 
 // WithReadTimeout bounds how long a single WebSocket read may block. Zero (the
@@ -137,10 +150,11 @@ func NewHTTPHandler(runtime Runtime, opts ...HandlerOption) http.Handler {
 			writeJSON(w, http.StatusOK, detail)
 		})
 		mux.HandleFunc("POST /skills/reload", func(w http.ResponseWriter, r *http.Request) {
-			if !requireAdmin(w, r, cfg.adminToken) {
+			principal, ok := requireRole(w, r, cfg.auth, auth.RoleAdmin)
+			if !ok {
 				return
 			}
-			if err := cfg.skills.ReloadSkills(); err != nil {
+			if err := cfg.skills.ReloadSkills(principal.Name); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -169,10 +183,11 @@ func NewHTTPHandler(runtime Runtime, opts ...HandlerOption) http.Handler {
 			writeJSON(w, http.StatusOK, detail)
 		})
 		mux.HandleFunc("POST /runs/{runID}/skill-proposals", func(w http.ResponseWriter, r *http.Request) {
-			if !requireAdmin(w, r, cfg.adminToken) {
+			principal, ok := requireRole(w, r, cfg.auth, auth.RoleReviewer)
+			if !ok {
 				return
 			}
-			detail, err := cfg.learning.CreateSkillProposal(r.Context(), r.PathValue("runID"))
+			detail, err := cfg.learning.CreateSkillProposal(r.Context(), r.PathValue("runID"), principal.Name)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
@@ -180,7 +195,8 @@ func NewHTTPHandler(runtime Runtime, opts ...HandlerOption) http.Handler {
 			writeJSON(w, http.StatusCreated, detail)
 		})
 		mux.HandleFunc("PATCH /skill-proposals/{proposalID}", func(w http.ResponseWriter, r *http.Request) {
-			if !requireAdmin(w, r, cfg.adminToken) {
+			principal, ok := requireRole(w, r, cfg.auth, auth.RoleReviewer)
+			if !ok {
 				return
 			}
 			var fields protocol.SkillProposalUpdateRequest
@@ -188,7 +204,7 @@ func NewHTTPHandler(runtime Runtime, opts ...HandlerOption) http.Handler {
 				http.Error(w, "invalid request body", http.StatusBadRequest)
 				return
 			}
-			detail, err := cfg.learning.UpdateSkillProposal(r.Context(), r.PathValue("proposalID"), fields)
+			detail, err := cfg.learning.UpdateSkillProposal(r.Context(), r.PathValue("proposalID"), fields, principal.Name)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
@@ -196,10 +212,11 @@ func NewHTTPHandler(runtime Runtime, opts ...HandlerOption) http.Handler {
 			writeJSON(w, http.StatusOK, detail)
 		})
 		mux.HandleFunc("POST /skill-proposals/{proposalID}/approve", func(w http.ResponseWriter, r *http.Request) {
-			if !requireAdmin(w, r, cfg.adminToken) {
+			principal, ok := requireRole(w, r, cfg.auth, auth.RoleReviewer)
+			if !ok {
 				return
 			}
-			detail, err := cfg.learning.ApproveSkillProposal(r.Context(), r.PathValue("proposalID"))
+			detail, err := cfg.learning.ApproveSkillProposal(r.Context(), r.PathValue("proposalID"), principal.Name)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
@@ -207,14 +224,15 @@ func NewHTTPHandler(runtime Runtime, opts ...HandlerOption) http.Handler {
 			writeJSON(w, http.StatusOK, detail)
 		})
 		mux.HandleFunc("POST /skill-proposals/{proposalID}/reject", func(w http.ResponseWriter, r *http.Request) {
-			if !requireAdmin(w, r, cfg.adminToken) {
+			principal, ok := requireRole(w, r, cfg.auth, auth.RoleReviewer)
+			if !ok {
 				return
 			}
 			var body struct {
 				Reason string `json:"reason"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
-			detail, err := cfg.learning.RejectSkillProposal(r.Context(), r.PathValue("proposalID"), body.Reason)
+			detail, err := cfg.learning.RejectSkillProposal(r.Context(), r.PathValue("proposalID"), body.Reason, principal.Name)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
