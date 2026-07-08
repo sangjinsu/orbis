@@ -2,26 +2,20 @@ package main
 
 import (
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/spf13/cobra"
 )
 
-// errUsage marks a command-line usage error. The subcommand prints its own
-// usage line to stderr; main maps this sentinel to exit code 2.
-var errUsage = errors.New("usage")
+// errUsage marks a command-line usage error; main maps it to exit code 2.
+var errUsage = errors.New("usage error")
 
 const defaultAddr = ":8080"
-
-// usagef writes a usage line to stderr and returns errUsage.
-func usagef(format string, args ...any) error {
-	fmt.Fprintf(os.Stderr, "usage: "+format+"\n", args...)
-	return errUsage
-}
 
 // commonFlags are shared by every HTTP subcommand. Resolution order:
 // flag > environment (ORBIS_ADDR / ORBIS_TOKEN) > default. config.Load is
@@ -35,12 +29,14 @@ type commonFlags struct {
 	asJSON  bool
 }
 
-func registerCommon(fs *flag.FlagSet) *commonFlags {
+// registerCommon attaches the shared client flags as persistent flags, so
+// every subcommand under the parent inherits them.
+func registerCommon(cmd *cobra.Command) *commonFlags {
 	f := &commonFlags{}
-	fs.StringVar(&f.addr, "addr", "", "server address (default $ORBIS_ADDR or :8080)")
-	fs.StringVar(&f.token, "token", "", "bearer token (default $ORBIS_TOKEN)")
-	fs.DurationVar(&f.timeout, "timeout", 10*time.Second, "request timeout")
-	fs.BoolVar(&f.asJSON, "json", false, "print the raw JSON response")
+	cmd.PersistentFlags().StringVar(&f.addr, "addr", "", "server address (default $ORBIS_ADDR or :8080)")
+	cmd.PersistentFlags().StringVar(&f.token, "token", "", "bearer token (default $ORBIS_TOKEN)")
+	cmd.PersistentFlags().DurationVar(&f.timeout, "timeout", 10*time.Second, "request timeout")
+	cmd.PersistentFlags().BoolVar(&f.asJSON, "json", false, "print the raw JSON response")
 	return f
 }
 
@@ -76,6 +72,8 @@ type stringList struct {
 }
 
 func (s *stringList) String() string { return strings.Join(s.values, ", ") }
+
+func (s *stringList) Type() string { return "string" }
 
 func (s *stringList) Set(value string) error {
 	s.set = true

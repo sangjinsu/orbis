@@ -160,10 +160,39 @@ func TestRunProposalApprove(t *testing.T) {
 	}
 }
 
-func TestProposalMainEditWithoutFieldsIsUsageError(t *testing.T) {
-	var out strings.Builder
-	err := proposalMain(context.Background(), []string{"edit", "prop_1"}, &out)
+func TestProposalEditWithoutFieldsIsUsageError(t *testing.T) {
+	root := newRootCmd()
+	root.SetArgs([]string{"proposal", "edit", "prop_1"})
+	root.SetOut(&strings.Builder{})
+	root.SetErr(&strings.Builder{})
+	err := root.Execute()
 	if !errors.Is(err, errUsage) {
-		t.Fatalf("proposalMain(edit without fields) error = %v, want errUsage", err)
+		t.Fatalf("proposal edit without fields error = %v, want errUsage", err)
+	}
+}
+
+// The cobra tree keeps the usage/runtime error split: bad flags and missing
+// positionals surface as errUsage (exit 2), unknown subcommands as errors.
+func TestRootCommandUsageErrors(t *testing.T) {
+	for _, args := range [][]string{
+		{"skills", "get"},                 // missing positional
+		{"proposal", "approve"},           // missing positional
+		{"watch", "--no-such-flag"},       // unknown flag
+		{"ws", "smoke", "bogus"},          // invalid smoke variant
+		{"proposal", "reject"},            // missing positional
+		{"skills", "list", "--bad-flag"},  // unknown flag on subcommand
+		{"proposal", "list", "extra-arg"}, // unexpected positional
+		{"skills", "reload", "extra-arg"}, // unexpected positional
+		{"watch", "extra"},                // unexpected positional
+		{"proposal", "edit"},              // missing positional
+	} {
+		root := newRootCmd()
+		root.SetArgs(args)
+		root.SetOut(&strings.Builder{})
+		root.SetErr(&strings.Builder{})
+		err := root.Execute()
+		if !errors.Is(err, errUsage) {
+			t.Fatalf("args %v error = %v, want errUsage", args, err)
+		}
 	}
 }

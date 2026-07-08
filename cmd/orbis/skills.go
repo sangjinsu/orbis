@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,41 +10,42 @@ import (
 	"text/tabwriter"
 
 	"github.com/sangjinsu/orbis/internal/protocol"
+	"github.com/spf13/cobra"
 )
 
-// skillsMain dispatches `orbis skills <list|get|reload>`. Positional arguments
-// come before flags because std flag stops parsing at the first non-flag.
-func skillsMain(ctx context.Context, args []string, out io.Writer) error {
-	if len(args) < 1 {
-		return usagef("orbis skills list | get <skillID> | reload  [-addr] [-token] [-json] [-timeout]")
+func newSkillsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "skills",
+		Short: "Inspect and reload the skill catalog",
 	}
-	sub, rest := args[0], args[1:]
-
-	var id string
-	if sub == "get" {
-		if len(rest) < 1 || strings.HasPrefix(rest[0], "-") {
-			return usagef("orbis skills get <skillID> [-addr] [-json]")
-		}
-		id, rest = rest[0], rest[1:]
-	}
-
-	fs := flag.NewFlagSet("skills "+sub, flag.ContinueOnError)
-	common := registerCommon(fs)
-	if err := fs.Parse(rest); err != nil {
-		return errUsage
-	}
-	client := common.client()
-
-	switch sub {
-	case "list":
-		return runSkillsList(ctx, client, common.asJSON, out)
-	case "get":
-		return runSkillsGet(ctx, client, id, common.asJSON, out)
-	case "reload":
-		return runSkillsReload(ctx, client, common.asJSON, out)
-	default:
-		return usagef("orbis skills list | get <skillID> | reload")
-	}
+	common := registerCommon(cmd)
+	cmd.AddCommand(
+		&cobra.Command{
+			Use:   "list",
+			Short: "List the active skills",
+			Args:  exactArgs(0, "orbis skills list"),
+			RunE: func(c *cobra.Command, _ []string) error {
+				return runSkillsList(c.Context(), common.client(), common.asJSON, c.OutOrStdout())
+			},
+		},
+		&cobra.Command{
+			Use:   "get <skillID>",
+			Short: "Show one skill including its body",
+			Args:  exactArgs(1, "orbis skills get <skillID>"),
+			RunE: func(c *cobra.Command, args []string) error {
+				return runSkillsGet(c.Context(), common.client(), args[0], common.asJSON, c.OutOrStdout())
+			},
+		},
+		&cobra.Command{
+			Use:   "reload",
+			Short: "Reload the skill index from disk (admin)",
+			Args:  exactArgs(0, "orbis skills reload"),
+			RunE: func(c *cobra.Command, _ []string) error {
+				return runSkillsReload(c.Context(), common.client(), common.asJSON, c.OutOrStdout())
+			},
+		},
+	)
+	return cmd
 }
 
 func runSkillsList(ctx context.Context, c *apiClient, asJSON bool, out io.Writer) error {
