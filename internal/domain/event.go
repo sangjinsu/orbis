@@ -50,6 +50,7 @@ const (
 	EventSkillCandidateDetected    EventType = "SkillCandidateDetected"
 	EventSkillProposalCreated      EventType = "SkillProposalCreated"
 	EventSkillReviewRequired       EventType = "SkillReviewRequired"
+	EventSkillProposalUpdated      EventType = "SkillProposalUpdated"
 	EventSkillProposalApproved     EventType = "SkillProposalApproved"
 	EventSkillProposalRejected     EventType = "SkillProposalRejected"
 	EventSkillPromoted             EventType = "SkillPromoted"

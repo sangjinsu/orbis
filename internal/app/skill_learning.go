@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/sangjinsu/orbis/internal/domain"
 	"github.com/sangjinsu/orbis/internal/protocol"
@@ -88,9 +89,16 @@ func (s *RuntimeService) CreateSkillProposalFromRun(ctx context.Context, runID, 
 	return proposal, nil
 }
 
-// appendSkillAudit writes one audit record for a proposal lifecycle transition.
-// The summary is a short user-visible sentence; no secrets, no hidden reasoning.
+// appendSkillAudit writes one audit record for a proposal lifecycle transition,
+// keyed by proposal and event type (each transition happens at most once).
 func (s *RuntimeService) appendSkillAudit(eventType string, proposal skill.SkillProposal, actor, summary string) error {
+	return s.appendSkillAuditRecord(fmt.Sprintf("audit_%s_%s", proposal.ProposalID, eventType), eventType, proposal, actor, summary)
+}
+
+// appendSkillAuditRecord writes one audit record with an explicit id, for
+// transitions that can repeat (reviewer edits carry a revision-suffixed id).
+// The summary is a short user-visible sentence; no secrets, no hidden reasoning.
+func (s *RuntimeService) appendSkillAuditRecord(auditID, eventType string, proposal skill.SkillProposal, actor, summary string) error {
 	if s.auditLog == nil {
 		return nil
 	}
@@ -98,7 +106,7 @@ func (s *RuntimeService) appendSkillAudit(eventType string, proposal skill.Skill
 		actor = skill.ActorUnknown
 	}
 	record := skill.AuditRecord{
-		AuditID:     fmt.Sprintf("audit_%s_%s", proposal.ProposalID, eventType),
+		AuditID:     auditID,
 		EventType:   eventType,
 		ProposalID:  proposal.ProposalID,
 		SkillID:     proposal.SkillID,
@@ -161,6 +169,7 @@ func proposalSummary(p skill.SkillProposal) protocol.SkillProposalSummary {
 		Version:          p.Version,
 		ContentHash:      p.ContentHash,
 		PromotedSkillID:  p.PromotedSkillID,
+		Revision:         p.Revision,
 		CreatedAt:        p.CreatedAt,
 		UpdatedAt:        p.UpdatedAt,
 	}
@@ -218,6 +227,16 @@ func (s *RuntimeService) GetSkillProposal(id string) (protocol.SkillProposalDeta
 // caller (gateway HTTP / WS after the token check).
 func (s *RuntimeService) CreateSkillProposal(ctx context.Context, runID string) (protocol.SkillProposalDetailPayload, error) {
 	p, err := s.CreateSkillProposalFromRun(ctx, runID, skill.ActorAdmin, true)
+	if err != nil {
+		return protocol.SkillProposalDetailPayload{}, err
+	}
+	return proposalDetail(p), nil
+}
+
+// UpdateSkillProposal applies a reviewer's structured-field edit for an
+// admin-authenticated caller.
+func (s *RuntimeService) UpdateSkillProposal(ctx context.Context, id string, fields protocol.SkillProposalUpdateRequest) (protocol.SkillProposalDetailPayload, error) {
+	p, err := s.updateSkillProposal(ctx, id, fields, skill.ActorAdmin)
 	if err != nil {
 		return protocol.SkillProposalDetailPayload{}, err
 	}
@@ -355,6 +374,105 @@ func (s *RuntimeService) failPromotion(ctx context.Context, sessionID string, pr
 	return proposal, fmt.Errorf("promote proposal %q: %w", proposal.ProposalID, cause)
 }
 
+// updateSkillProposal applies a reviewer's structured-field edit to a pending
+// proposal. Only the fields that compose the rendered body are editable; Body
+// and ContentHash are re-derived through the creation renderer so an edited
+// proposal can never drift from what promotion would write. Identity fields
+// (SkillID, SourceRunID) and the detection RationaleSummary stay immutable.
+// Emits SkillProposalUpdated -> SkillAuditRecorded with revision-unique ids.
+func (s *RuntimeService) updateSkillProposal(ctx context.Context, proposalID string, fields protocol.SkillProposalUpdateRequest, actor string) (skill.SkillProposal, error) {
+	if s.proposals == nil {
+		return skill.SkillProposal{}, errSkillLearningDisabled
+	}
+	proposal, err := s.proposals.Get(proposalID)
+	if err != nil {
+		return skill.SkillProposal{}, err
+	}
+	// Resolve the source session up front (same order as approve/reject) so an
+	// unresolvable source run fails the operation before any change.
+	run, err := s.store.LoadRun(ctx, proposal.SourceRunID)
+	if err != nil {
+		return skill.SkillProposal{}, fmt.Errorf("load source run: %w", err)
+	}
+	if proposal.Status != skill.ProposalPending {
+		return skill.SkillProposal{}, fmt.Errorf("proposal %q is %s, not pending", proposalID, proposal.Status)
+	}
+
+	edited := applyProposalEdit(&proposal, fields)
+	if len(edited) == 0 {
+		return skill.SkillProposal{}, fmt.Errorf("no editable fields provided")
+	}
+	if strings.TrimSpace(proposal.Title) == "" {
+		return skill.SkillProposal{}, fmt.Errorf("proposal %q: title cannot be cleared", proposalID)
+	}
+	proposal.Rerender()
+	proposal.Revision++
+	proposal.UpdatedAt = s.now()
+	// Same-status rewrite: the store validates but requires no transition. The
+	// Get -> mutate -> Update sequence is not atomic across callers, which the
+	// single-admin review model accepts.
+	if err := s.proposals.Update(proposal); err != nil {
+		return skill.SkillProposal{}, err
+	}
+
+	summary := "proposal updated: " + strings.Join(edited, ", ")
+	auditID := fmt.Sprintf("audit_%s_%s_r%d", proposal.ProposalID, domain.EventSkillProposalUpdated, proposal.Revision)
+	if err := s.appendSkillAuditRecord(auditID, string(domain.EventSkillProposalUpdated), proposal, actor, summary); err != nil {
+		return skill.SkillProposal{}, err
+	}
+	eventID := fmt.Sprintf("%s:skill_proposal_updated:%d", proposal.SourceRunID, proposal.Revision)
+	if err := s.emitSkillLearningEvent(ctx, run.SessionID, proposal.SourceRunID, eventID, domain.EventSkillProposalUpdated, skillLearningEventPayload{
+		ProposalID: proposal.ProposalID, SkillID: proposal.SkillID, Status: string(proposal.Status), Reason: summary,
+	}); err != nil {
+		return skill.SkillProposal{}, err
+	}
+	if err := s.emitSkillLearningEvent(ctx, run.SessionID, proposal.SourceRunID, eventID+":audit", domain.EventSkillAuditRecorded, skillLearningEventPayload{
+		ProposalID: proposal.ProposalID, SkillID: proposal.SkillID, Status: string(proposal.Status), Reason: "updated",
+	}); err != nil {
+		return skill.SkillProposal{}, err
+	}
+	return proposal, nil
+}
+
+// applyProposalEdit copies each provided (non-nil) field onto the proposal and
+// returns the wire names of the fields it set, for the audit summary.
+func applyProposalEdit(p *skill.SkillProposal, fields protocol.SkillProposalUpdateRequest) []string {
+	var edited []string
+	if fields.Title != nil {
+		p.Title = *fields.Title
+		edited = append(edited, "title")
+	}
+	if fields.Purpose != nil {
+		p.Purpose = *fields.Purpose
+		edited = append(edited, "purpose")
+	}
+	if fields.WhenToUse != nil {
+		p.WhenToUse = *fields.WhenToUse
+		edited = append(edited, "when_to_use")
+	}
+	if fields.RequiredContext != nil {
+		p.RequiredContext = *fields.RequiredContext
+		edited = append(edited, "required_context")
+	}
+	if fields.Procedure != nil {
+		p.Procedure = *fields.Procedure
+		edited = append(edited, "procedure")
+	}
+	if fields.RelatedTools != nil {
+		p.RelatedTools = *fields.RelatedTools
+		edited = append(edited, "related_tools")
+	}
+	if fields.Verification != nil {
+		p.Verification = *fields.Verification
+		edited = append(edited, "verification")
+	}
+	if fields.Pitfalls != nil {
+		p.Pitfalls = *fields.Pitfalls
+		edited = append(edited, "pitfalls")
+	}
+	return edited
+}
+
 // rejectSkillProposal rejects a pending proposal, emitting
 // SkillProposalRejected -> SkillAuditRecorded.
 func (s *RuntimeService) rejectSkillProposal(ctx context.Context, proposalID, actor, reason string) (skill.SkillProposal, error) {
@@ -421,6 +539,12 @@ type skillProposalActionParams struct {
 	Token      string `json:"token"`
 }
 
+type skillProposalUpdateParams struct {
+	ProposalID string `json:"proposal_id"`
+	Token      string `json:"token"`
+	protocol.SkillProposalUpdateRequest
+}
+
 func (s *RuntimeService) handleSkillProposalList(_ context.Context, req protocol.ClientRequest) (json.RawMessage, error) {
 	var params skillProposalListParams
 	if len(req.Params) > 0 {
@@ -469,6 +593,26 @@ func (s *RuntimeService) handleSkillProposalCreate(ctx context.Context, req prot
 		return nil, fmt.Errorf("run_id is required")
 	}
 	detail, err := s.CreateSkillProposal(ctx, params.RunID)
+	if err != nil {
+		return nil, err
+	}
+	return marshalPayload(detail)
+}
+
+func (s *RuntimeService) handleSkillProposalUpdate(ctx context.Context, req protocol.ClientRequest) (json.RawMessage, error) {
+	var params skillProposalUpdateParams
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return nil, fmt.Errorf("decode skill.proposal.update params: %w", err)
+		}
+	}
+	if err := s.requireAdmin(params.Token); err != nil {
+		return nil, err
+	}
+	if params.ProposalID == "" {
+		return nil, fmt.Errorf("proposal_id is required")
+	}
+	detail, err := s.UpdateSkillProposal(ctx, params.ProposalID, params.SkillProposalUpdateRequest)
 	if err != nil {
 		return nil, err
 	}

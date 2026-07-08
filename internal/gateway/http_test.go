@@ -203,6 +203,8 @@ type recordingSkillLearning struct {
 	lastStatus string
 	lastReason string
 	created    []string
+	updated    []string
+	lastUpdate protocol.SkillProposalUpdateRequest
 	approved   []string
 	rejected   []string
 }
@@ -220,6 +222,12 @@ func (l *recordingSkillLearning) GetSkillProposal(id string) (protocol.SkillProp
 func (l *recordingSkillLearning) CreateSkillProposal(_ context.Context, runID string) (protocol.SkillProposalDetailPayload, error) {
 	l.created = append(l.created, runID)
 	return protocol.SkillProposalDetailPayload{SkillProposalSummary: protocol.SkillProposalSummary{ProposalID: "prop_" + runID, Status: "pending"}}, nil
+}
+
+func (l *recordingSkillLearning) UpdateSkillProposal(_ context.Context, id string, fields protocol.SkillProposalUpdateRequest) (protocol.SkillProposalDetailPayload, error) {
+	l.updated = append(l.updated, id)
+	l.lastUpdate = fields
+	return protocol.SkillProposalDetailPayload{SkillProposalSummary: protocol.SkillProposalSummary{ProposalID: id, Status: "pending", Revision: 1}}, nil
 }
 
 func (l *recordingSkillLearning) ApproveSkillProposal(_ context.Context, id string) (protocol.SkillProposalDetailPayload, error) {
@@ -297,6 +305,31 @@ func TestHTTPSkillProposalEndpoints(t *testing.T) {
 		}
 	})
 
+	t.Run("update requires bearer token and decodes fields", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/skill-proposals/prop_1", strings.NewReader(`{"title":"Edited"}`)))
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("update without token status = %d, want 401", rec.Code)
+		}
+		rec = admin(http.MethodPatch, "/skill-proposals/prop_1", `{"title":"Edited","procedure":["one","two"]}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("update status = %d, want 200: %s", rec.Code, rec.Body)
+		}
+		if len(learning.updated) != 1 || learning.updated[0] != "prop_1" {
+			t.Fatalf("updated = %v, want [prop_1]", learning.updated)
+		}
+		if learning.lastUpdate.Title == nil || *learning.lastUpdate.Title != "Edited" {
+			t.Fatalf("update title = %v, want Edited", learning.lastUpdate.Title)
+		}
+		if learning.lastUpdate.Procedure == nil || len(*learning.lastUpdate.Procedure) != 2 {
+			t.Fatalf("update procedure = %v, want two steps", learning.lastUpdate.Procedure)
+		}
+		rec = admin(http.MethodPatch, "/skill-proposals/prop_1", `not json`)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("update with invalid body status = %d, want 400", rec.Code)
+		}
+	})
+
 	t.Run("approve and reject", func(t *testing.T) {
 		rec := admin(http.MethodPost, "/skill-proposals/prop_1/approve", "")
 		if rec.Code != http.StatusOK {
@@ -326,14 +359,22 @@ func TestHTTPSkillProposalMutationsDisabledWithoutAdmin(t *testing.T) {
 		t.Fatalf("GET /skill-proposals status = %d, want 200", rec.Code)
 	}
 	// Mutations are disabled entirely with no admin token configured.
-	for _, path := range []string{"/runs/run_1/skill-proposals", "/skill-proposals/p/approve", "/skill-proposals/p/reject"} {
+	for _, req := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/runs/run_1/skill-proposals"},
+		{http.MethodPatch, "/skill-proposals/p"},
+		{http.MethodPost, "/skill-proposals/p/approve"},
+		{http.MethodPost, "/skill-proposals/p/reject"},
+	} {
 		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, nil))
+		handler.ServeHTTP(rec, httptest.NewRequest(req.method, req.path, nil))
 		if rec.Code != http.StatusForbidden {
-			t.Fatalf("POST %s status = %d, want 403", path, rec.Code)
+			t.Fatalf("%s %s status = %d, want 403", req.method, req.path, rec.Code)
 		}
 	}
-	if len(learning.created)+len(learning.approved)+len(learning.rejected) != 0 {
+	if len(learning.created)+len(learning.updated)+len(learning.approved)+len(learning.rejected) != 0 {
 		t.Fatal("mutating calls reached the service despite the disabled admin gate")
 	}
 }

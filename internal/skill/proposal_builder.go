@@ -82,6 +82,14 @@ func NewProposalFromRun(proposalID string, facts RunFacts, reason string, now ti
 	return proposal
 }
 
+// Rerender re-derives Body and ContentHash from the structured fields after a
+// reviewer edit, using the same renderer as proposal creation so an edited
+// proposal can never drift from what promotion would write.
+func (p *SkillProposal) Rerender() {
+	p.Body = renderProposalBody(*p)
+	p.ContentHash = contentHash(p.Body)
+}
+
 // renderProposalBody renders the markdown body that would become the skill file
 // on promotion, in the same section format as the seed skills.
 func renderProposalBody(p SkillProposal) string {

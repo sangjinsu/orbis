@@ -1164,6 +1164,124 @@ func TestRuntimeServiceApproveBumpsExistingLearnedSkill(t *testing.T) {
 	}
 }
 
+func TestRuntimeServiceUpdatesPendingProposal(t *testing.T) {
+	ctx := context.Background()
+	service, proposals, skillStore, fileStore, _, auditPath, events, unsubscribe := newReviewService(t)
+	defer unsubscribe()
+	defer service.Close()
+	runID := completeToolRun(t, service, fileStore, events)
+
+	created, err := service.CreateSkillProposalFromRun(ctx, runID, skill.ActorAdmin, true)
+	if err != nil {
+		t.Fatalf("CreateSkillProposalFromRun() error = %v", err)
+	}
+	_ = collectRuntimeEventsUntil(t, events, string(domain.EventSkillReviewRequired))
+
+	updatePayload, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
+		Type: "req", ID: "sp_update", Method: "skill.proposal.update",
+		Params: json.RawMessage(`{"proposal_id":"` + created.ProposalID + `","token":"admin-tok","title":"Edited workflow","procedure":["first step","second step"]}`),
+	})
+	if err != nil {
+		t.Fatalf("skill.proposal.update error = %v", err)
+	}
+	var updated protocol.SkillProposalDetailPayload
+	if err := json.Unmarshal(updatePayload, &updated); err != nil {
+		t.Fatalf("unmarshal updated proposal: %v", err)
+	}
+	if updated.Revision != 1 || updated.Title != "Edited workflow" || updated.Status != string(skill.ProposalPending) {
+		t.Fatalf("updated = %#v, want pending revision 1 with the edited title", updated.SkillProposalSummary)
+	}
+	if !strings.Contains(updated.Body, "# Edited workflow") || !strings.Contains(updated.Body, "1. first step") {
+		t.Fatalf("updated body does not reflect the edit:\n%s", updated.Body)
+	}
+	if updated.ContentHash == created.ContentHash {
+		t.Fatal("content hash unchanged after the edit")
+	}
+
+	received := collectRuntimeEventsUntil(t, events, string(domain.EventSkillAuditRecorded))
+	assertOrderedSubsequence(t, eventNames(received),
+		string(domain.EventSkillProposalUpdated),
+		string(domain.EventSkillAuditRecorded),
+	)
+	audit, err := os.ReadFile(auditPath)
+	if err != nil || !strings.Contains(string(audit), string(domain.EventSkillProposalUpdated)) ||
+		!strings.Contains(string(audit), "proposal updated: title, procedure") {
+		t.Fatalf("audit log missing the update record: %v\n%s", err, audit)
+	}
+
+	// A second edit bumps the revision again with unique audit/event ids.
+	if _, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
+		Type: "req", ID: "sp_update2", Method: "skill.proposal.update",
+		Params: json.RawMessage(`{"proposal_id":"` + created.ProposalID + `","token":"admin-tok","purpose":"Sharper purpose"}`),
+	}); err != nil {
+		t.Fatalf("second skill.proposal.update error = %v", err)
+	}
+	stored, err := proposals.Get(created.ProposalID)
+	if err != nil || stored.Revision != 2 || stored.Purpose != "Sharper purpose" {
+		t.Fatalf("stored proposal = %#v, %v; want revision 2 with the new purpose", stored, err)
+	}
+
+	// The edited body is exactly what promotion writes.
+	if _, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
+		Type: "req", ID: "sp_approve", Method: "skill.proposal.approve",
+		Params: json.RawMessage(`{"proposal_id":"` + created.ProposalID + `","token":"admin-tok"}`),
+	}); err != nil {
+		t.Fatalf("approve after edit error = %v", err)
+	}
+	entry, ok := skillStore.Get(created.SkillID)
+	if !ok || entry.Body != stored.Body {
+		t.Fatalf("promoted body != edited body (ok=%v)", ok)
+	}
+	if entry.Title != "Edited workflow" || entry.Description != "Sharper purpose" {
+		t.Fatalf("promoted entry = %#v, want the edited title/purpose", entry.Metadata)
+	}
+}
+
+func TestRuntimeServiceUpdateProposalValidation(t *testing.T) {
+	ctx := context.Background()
+	service, _, _, fileStore, _, _, events, unsubscribe := newReviewService(t)
+	defer unsubscribe()
+	defer service.Close()
+	runID := completeToolRun(t, service, fileStore, events)
+
+	created, err := service.CreateSkillProposalFromRun(ctx, runID, skill.ActorAdmin, true)
+	if err != nil {
+		t.Fatalf("CreateSkillProposalFromRun() error = %v", err)
+	}
+	_ = collectRuntimeEventsUntil(t, events, string(domain.EventSkillReviewRequired))
+	update := func(id, fields string) error {
+		_, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
+			Type: "req", ID: "sp_u", Method: "skill.proposal.update",
+			Params: json.RawMessage(`{"proposal_id":"` + id + `","token":"admin-tok"` + fields + `}`),
+		})
+		return err
+	}
+
+	if err := update(created.ProposalID, ""); err == nil || !strings.Contains(err.Error(), "no editable fields") {
+		t.Fatalf("empty update error = %v, want no-editable-fields error", err)
+	}
+	if err := update(created.ProposalID, `,"title":""`); err == nil || !strings.Contains(err.Error(), "title cannot be cleared") {
+		t.Fatalf("empty title error = %v, want title-cannot-be-cleared error", err)
+	}
+	if err := update("prop_missing", `,"title":"x"`); !errors.Is(err, skill.ErrProposalNotFound) {
+		t.Fatalf("unknown id error = %v, want ErrProposalNotFound", err)
+	}
+
+	// Non-pending proposals are immutable.
+	if _, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
+		Type: "req", ID: "sp_rej", Method: "skill.proposal.reject",
+		Params: json.RawMessage(`{"proposal_id":"` + created.ProposalID + `","reason":"nope","token":"admin-tok"}`),
+	}); err != nil {
+		t.Fatalf("reject error = %v", err)
+	}
+	// Drain the reject lifecycle so the event queue is not persisting the run
+	// snapshot while the update reloads it.
+	_ = collectRuntimeEventsUntil(t, events, string(domain.EventSkillAuditRecorded))
+	if err := update(created.ProposalID, `,"title":"late edit"`); err == nil || !strings.Contains(err.Error(), "not pending") {
+		t.Fatalf("non-pending update error = %v, want not-pending error", err)
+	}
+}
+
 func TestSkillLearningWSAdminGating(t *testing.T) {
 	ctx := context.Background()
 
@@ -1181,6 +1299,12 @@ func TestSkillLearningWSAdminGating(t *testing.T) {
 		Params: json.RawMessage(`{"proposal_id":"p","token":"anything"}`),
 	}); !errors.Is(err, errAdminDisabled) {
 		t.Fatalf("error = %v, want errAdminDisabled", err)
+	}
+	if _, err := noToken.HandleClientRequest(ctx, protocol.ClientRequest{
+		Type: "req", ID: "g1u", Method: "skill.proposal.update",
+		Params: json.RawMessage(`{"proposal_id":"p","token":"anything","title":"t"}`),
+	}); !errors.Is(err, errAdminDisabled) {
+		t.Fatalf("update error = %v, want errAdminDisabled", err)
 	}
 
 	// Token configured: a wrong token is rejected, reads stay open.

@@ -120,6 +120,7 @@ short user-visible summary only — never secrets or hidden reasoning.
 WebSocket subscribers of the source run's session observe the lifecycle:
 
 - Creation: `SkillCandidateDetected` → `SkillProposalCreated` → `SkillReviewRequired`
+- Reviewer edit (v2.1): `SkillProposalUpdated` → `SkillAuditRecorded`
 - Approval: `SkillProposalApproved` → `SkillPromoted` →
   `SkillIndexReloadRequested` → `SkillIndexReloaded` → `SkillAuditRecorded`
 - Rejection: `SkillProposalRejected` → `SkillAuditRecorded`
@@ -131,12 +132,13 @@ Payloads carry metadata only (`proposal_id`, `skill_id`, `status`, `reason`,
 ## HTTP endpoints
 
 ```
-GET  /skill-proposals?status=pending        # list (open)
-GET  /skill-proposals/{proposalID}          # detail incl. body (open), 404 unknown
-POST /runs/{runID}/skill-proposals          # create from run (admin), 201
-POST /skill-proposals/{proposalID}/approve  # approve + promote + reload (admin)
-POST /skill-proposals/{proposalID}/reject   # reject, body {"reason": "..."} (admin)
-POST /skills/reload                         # reload the index (admin as of v2)
+GET   /skill-proposals?status=pending        # list (open)
+GET   /skill-proposals/{proposalID}          # detail incl. body (open), 404 unknown
+POST  /runs/{runID}/skill-proposals          # create from run (admin), 201
+PATCH /skill-proposals/{proposalID}          # edit a pending proposal (admin)
+POST  /skill-proposals/{proposalID}/approve  # approve + promote + reload (admin)
+POST  /skill-proposals/{proposalID}/reject   # reject, body {"reason": "..."} (admin)
+POST  /skills/reload                         # reload the index (admin as of v2)
 ```
 
 ## WebSocket methods
@@ -145,10 +147,33 @@ POST /skills/reload                         # reload the index (admin as of v2)
 skill.proposal.list             params: {"status": "..."}            (open)
 skill.proposal.get              params: {"proposal_id": "..."}       (open)
 skill.proposal.create_from_run  params: {"run_id","token"}           (admin)
+skill.proposal.update           params: {"proposal_id","token",<fields>} (admin)
 skill.proposal.approve          params: {"proposal_id","token"}      (admin)
 skill.proposal.reject           params: {"proposal_id","reason","token"} (admin)
 skill.reload                    params: {"token"}                    (admin as of v2)
 ```
+
+## Reviewer edits (v2.1)
+
+A pending proposal's structured fields can be edited before the approve/reject
+decision: `title`, `purpose`, `when_to_use`, `required_context`, `procedure`,
+`related_tools`, `verification`, `pitfalls`. Fields omitted from the request
+are unchanged; provided fields replace the stored value (lists may be cleared
+with `[]`, but `title` may not be emptied). The markdown body and content hash
+are always re-derived server-side through the same renderer that created the
+proposal, so an edited proposal can never drift from what promotion writes.
+
+```
+PATCH /skill-proposals/{proposalID}
+Authorization: Bearer <token>
+{"title": "Sharper title", "procedure": ["step one", "step two"]}
+```
+
+Not editable: `skill_id` and `source_run_id` (identity), `rationale_summary`
+(the detection record), and `body` (always rendered). Each edit increments the
+proposal's `revision`, appends a revision-keyed audit record naming the edited
+fields, and emits `SkillProposalUpdated`. Only pending proposals can be
+edited — approved, rejected, promoted, and failed proposals are immutable.
 
 ## Admin protection
 
@@ -190,7 +215,7 @@ Then inspect `data/skill_proposals/`, `data/skills/index.json`, and
 ## Limitations (v2)
 
 - Proposal bodies are deterministic templates rendered from run data; there is
-  no LLM authoring and no edit-before-approve (future work).
+  no LLM authoring (reviewer edits of the structured fields landed in v2.1).
 - Lifecycle events are scoped to the source run's session; the standalone
   `/skills/reload` emits no events.
 - The admin token is a single static bearer for local development, not a full
