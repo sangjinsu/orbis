@@ -853,11 +853,16 @@ func TestCreateSkillProposalRequiresLearningEnabled(t *testing.T) {
 // newReviewService wires the full v2 review loop: the learning stores plus a
 // real skill store (empty index) and promoter over a temp skills directory,
 // guarded by an admin token.
-func newReviewService(t *testing.T) (*RuntimeService, *skill.ProposalStore, *skill.Store, *store.FileStore, string, string, <-chan protocol.RuntimeEvent, func()) {
+func newReviewService(t *testing.T) (*RuntimeService, *skill.ProposalStore, *skill.Store, *store.FileStore, string, string, <-chan protocol.RuntimeEvent, <-chan protocol.RuntimeEvent, func()) {
 	t.Helper()
 	fileStore := store.NewFileStore(t.TempDir())
 	eventBroker := broker.New()
 	events, unsubscribe := eventBroker.Subscribe(context.Background(), "session_1")
+	global, unsubscribeGlobal := eventBroker.SubscribeGlobal(context.Background())
+	cleanup := func() {
+		unsubscribe()
+		unsubscribeGlobal()
+	}
 
 	skillsDir := filepath.Join(fileStore.Root(), "skills")
 	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
@@ -887,12 +892,12 @@ func newReviewService(t *testing.T) (*RuntimeService, *skill.ProposalStore, *ski
 		AdminToken:    "admin-tok",
 		Now:           func() time.Time { return time.Unix(1700000000, 0).UTC() },
 	})
-	return service, proposals, skillStore, fileStore, skillsDir, auditPath, events, unsubscribe
+	return service, proposals, skillStore, fileStore, skillsDir, auditPath, events, global, cleanup
 }
 
 func TestRuntimeServiceApproveFlowPromotesAndReloads(t *testing.T) {
 	ctx := context.Background()
-	service, _, skillStore, fileStore, skillsDir, auditPath, events, unsubscribe := newReviewService(t)
+	service, _, skillStore, fileStore, skillsDir, auditPath, events, _, unsubscribe := newReviewService(t)
 	defer unsubscribe()
 	defer service.Close()
 	runID := completeToolRun(t, service, fileStore, events)
@@ -971,7 +976,7 @@ func TestRuntimeServiceApproveFlowPromotesAndReloads(t *testing.T) {
 
 func TestRuntimeServiceRejectFlow(t *testing.T) {
 	ctx := context.Background()
-	service, proposals, _, fileStore, _, auditPath, events, unsubscribe := newReviewService(t)
+	service, proposals, _, fileStore, _, auditPath, events, _, unsubscribe := newReviewService(t)
 	defer unsubscribe()
 	defer service.Close()
 	runID := completeToolRun(t, service, fileStore, events)
@@ -1022,7 +1027,7 @@ func TestRuntimeServiceRejectFlow(t *testing.T) {
 
 func TestRuntimeServiceApproveConflictMarksFailed(t *testing.T) {
 	ctx := context.Background()
-	service, proposals, skillStore, fileStore, skillsDir, auditPath, events, unsubscribe := newReviewService(t)
+	service, proposals, skillStore, fileStore, skillsDir, auditPath, events, _, unsubscribe := newReviewService(t)
 	defer unsubscribe()
 	defer service.Close()
 	runID := completeToolRun(t, service, fileStore, events)
@@ -1079,7 +1084,7 @@ func TestRuntimeServiceApproveConflictMarksFailed(t *testing.T) {
 
 func TestRuntimeServiceApproveBumpsExistingLearnedSkill(t *testing.T) {
 	ctx := context.Background()
-	service, proposals, skillStore, fileStore, skillsDir, _, events, unsubscribe := newReviewService(t)
+	service, proposals, skillStore, fileStore, skillsDir, _, events, _, unsubscribe := newReviewService(t)
 	defer unsubscribe()
 	defer service.Close()
 	runID := completeToolRun(t, service, fileStore, events)
@@ -1164,9 +1169,104 @@ func TestRuntimeServiceApproveBumpsExistingLearnedSkill(t *testing.T) {
 	}
 }
 
+func TestApproveFlowFansOutToGlobalFeed(t *testing.T) {
+	ctx := context.Background()
+	service, _, _, fileStore, _, _, events, global, unsubscribe := newReviewService(t)
+	defer unsubscribe()
+	defer service.Close()
+	runID := completeToolRun(t, service, fileStore, events)
+
+	// Per-run events (RunStarted..RunCompleted) never reach the global feed;
+	// they were already published synchronously by the time the run completed.
+	select {
+	case got := <-global:
+		t.Fatalf("global feed received %#v before any skill activity", got)
+	default:
+	}
+
+	if _, err := service.CreateSkillProposalFromRun(ctx, runID, skill.ActorAdmin, true); err != nil {
+		t.Fatalf("CreateSkillProposalFromRun() error = %v", err)
+	}
+	_ = collectRuntimeEventsUntil(t, events, string(domain.EventSkillReviewRequired))
+	if _, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
+		Type: "req", ID: "sp_approve", Method: "skill.proposal.approve",
+		Params: json.RawMessage(`{"proposal_id":"prop_` + runID + `","token":"admin-tok"}`),
+	}); err != nil {
+		t.Fatalf("approve error = %v", err)
+	}
+
+	// The full lifecycle is observable globally without a session subscription,
+	// as the same sequenced wire events the session subscribers see.
+	received := collectRuntimeEventsUntil(t, global, string(domain.EventSkillAuditRecorded))
+	assertOrderedSubsequence(t, eventNames(received),
+		string(domain.EventSkillProposalCreated),
+		string(domain.EventSkillProposalApproved),
+		string(domain.EventSkillPromoted),
+		string(domain.EventSkillIndexReloadRequested),
+		string(domain.EventSkillIndexReloaded),
+		string(domain.EventSkillAuditRecorded),
+	)
+	for _, ev := range received {
+		if ev.SessionID != "session_1" || ev.Seq == 0 {
+			t.Fatalf("global lifecycle event = %#v, want the sequenced session event", ev)
+		}
+	}
+}
+
+func TestSkillReloadEmitsGlobalEvents(t *testing.T) {
+	ctx := context.Background()
+	service, _, _, _, _, _, _, global, unsubscribe := newReviewService(t)
+	defer unsubscribe()
+	defer service.Close()
+
+	if _, err := service.HandleClientRequest(ctx, protocol.ClientRequest{
+		Type: "req", ID: "sr", Method: "skill.reload",
+		Params: json.RawMessage(`{"token":"admin-tok"}`),
+	}); err != nil {
+		t.Fatalf("skill.reload error = %v", err)
+	}
+
+	received := collectRuntimeEventsUntil(t, global, string(domain.EventSkillIndexReloaded))
+	assertOrderedSubsequence(t, eventNames(received),
+		string(domain.EventSkillIndexReloadRequested),
+		string(domain.EventSkillIndexReloaded),
+	)
+	last := received[len(received)-1]
+	if last.SessionID != "" || last.Seq != 0 || last.RunID != "" {
+		t.Fatalf("global reload event = %#v, want sessionless and unsequenced", last)
+	}
+	var payload struct {
+		Actor string `json:"actor"`
+	}
+	if err := json.Unmarshal(last.Payload, &payload); err != nil || payload.Actor != skill.ActorAdmin {
+		t.Fatalf("reload payload = %s, %v; want actor admin", last.Payload, err)
+	}
+
+	// With skills disabled the reload fails cleanly and emits nothing at all.
+	disabled := NewRuntimeService(RuntimeServiceConfig{
+		Store:       store.NewFileStore(t.TempDir()),
+		Broker:      broker.New(),
+		LLMProvider: &fakeProvider{response: worker.LLMResponse{Text: "ok"}},
+		AdminToken:  "admin-tok",
+		Now:         func() time.Time { return time.Unix(1700000000, 0).UTC() },
+	})
+	defer disabled.Close()
+	if _, err := disabled.HandleClientRequest(ctx, protocol.ClientRequest{
+		Type: "req", ID: "sr2", Method: "skill.reload",
+		Params: json.RawMessage(`{"token":"admin-tok"}`),
+	}); err == nil {
+		t.Fatal("skill.reload with skills disabled error = nil, want error")
+	}
+	select {
+	case got := <-global:
+		t.Fatalf("global feed received %#v from the disabled service", got)
+	default:
+	}
+}
+
 func TestRuntimeServiceUpdatesPendingProposal(t *testing.T) {
 	ctx := context.Background()
-	service, proposals, skillStore, fileStore, _, auditPath, events, unsubscribe := newReviewService(t)
+	service, proposals, skillStore, fileStore, _, auditPath, events, _, unsubscribe := newReviewService(t)
 	defer unsubscribe()
 	defer service.Close()
 	runID := completeToolRun(t, service, fileStore, events)
@@ -1239,7 +1339,7 @@ func TestRuntimeServiceUpdatesPendingProposal(t *testing.T) {
 
 func TestRuntimeServiceUpdateProposalValidation(t *testing.T) {
 	ctx := context.Background()
-	service, _, _, fileStore, _, _, events, unsubscribe := newReviewService(t)
+	service, _, _, fileStore, _, _, events, _, unsubscribe := newReviewService(t)
 	defer unsubscribe()
 	defer service.Close()
 	runID := completeToolRun(t, service, fileStore, events)

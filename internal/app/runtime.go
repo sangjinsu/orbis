@@ -42,6 +42,7 @@ type RuntimeServiceConfig struct {
 
 type EventBroker interface {
 	Publish(event protocol.RuntimeEvent)
+	PublishGlobal(event protocol.RuntimeEvent)
 }
 
 type RuntimeService struct {
@@ -492,7 +493,35 @@ func (s *RuntimeService) publish(event domain.Event) {
 	if s.broker == nil {
 		return
 	}
-	s.broker.Publish(runtimeEventFromDomain(event))
+	wire := runtimeEventFromDomain(event)
+	s.broker.Publish(wire)
+	// Skill-learning lifecycle events are admin-facing metadata: fan the same
+	// sequenced wire event out to global subscribers so a reviewer does not
+	// need to know the source run's session. Per-run events stay session-only.
+	if isSkillLifecycleEvent(event.Type) {
+		s.broker.PublishGlobal(wire)
+	}
+}
+
+// isSkillLifecycleEvent reports whether an event belongs to the reviewable
+// skill-learning lifecycle (v2/v2.1) — the whitelist for the global feed.
+func isSkillLifecycleEvent(t domain.EventType) bool {
+	switch t {
+	case domain.EventSkillCandidateDetected,
+		domain.EventSkillProposalCreated,
+		domain.EventSkillReviewRequired,
+		domain.EventSkillProposalUpdated,
+		domain.EventSkillProposalApproved,
+		domain.EventSkillProposalRejected,
+		domain.EventSkillPromoted,
+		domain.EventSkillPromotionFailed,
+		domain.EventSkillIndexReloadRequested,
+		domain.EventSkillIndexReloaded,
+		domain.EventSkillAuditRecorded:
+		return true
+	default:
+		return false
+	}
 }
 
 func runtimeEventFromDomain(event domain.Event) protocol.RuntimeEvent {
