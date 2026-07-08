@@ -271,6 +271,8 @@ served the revised body → reload matrix bob 403 / alice 200 / legacy token
 
 ## Post-v2.1 Follow-ups
 
+- done: learning-loop CLI (`orbis skills|proposal|watch`) — the tmp_globalwatch
+  demo script is superseded by `orbis watch`; delete it in a separate cleanup.
 - consider reviewer-gating the global feed if payloads grow beyond metadata.
 - token rotation/expiry or an external IdP when static tokens fall short.
 - v2.2 candidates: multi-entry version history; proposal deletion/expiry.

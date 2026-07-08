@@ -54,7 +54,7 @@ flowchart LR
 
 | Package | Responsibility |
 | --- | --- |
-| `cmd/orbis` | CLI entrypoint: `serve`, `ws smoke [tool\|skill]` |
+| `cmd/orbis` | CLI entrypoint: `serve`, `ws smoke [tool\|skill]`, `skills`, `proposal`, `watch` |
 | `internal/app` | runtime service 조립과 WebSocket method 처리 |
 | `internal/domain` | event, action, run, session 등 안정적인 domain type |
 | `internal/runtime` | reducer, dispatcher, session lane, loop coordination |
@@ -200,6 +200,22 @@ go run ./cmd/orbis ws smoke skill    # skill selection + injection path
 
 smoke client는 `session.subscribe` 후 `session.message`를 보내고, ACK와 event
 이름을 출력합니다. `RunCompleted`까지 도달하지 못하면 실패합니다.
+
+## Learning-loop CLI
+
+skill 학습 루프는 curl 없이 CLI로 조작할 수 있습니다. 주소는 `-addr` 또는
+`$ORBIS_ADDR`(기본 `:8080`), 토큰은 `-token` 또는 `$ORBIS_TOKEN`으로 줍니다.
+
+```bash
+go run ./cmd/orbis watch                                  # 글로벌 이벤트 피드 스트림
+go run ./cmd/orbis proposal list -status pending
+go run ./cmd/orbis proposal edit prop_x -title "..." -token <reviewer-token>
+go run ./cmd/orbis proposal approve prop_x -token <reviewer-token>
+go run ./cmd/orbis skills list                            # 승격된 skill 확인
+go run ./cmd/orbis skills reload -token <admin-token>
+```
+
+전체 커맨드↔엔드포인트 매핑은 `docs/skill-learning.md`의 CLI 섹션을 참고하세요.
 
 ## Manual WebSocket Test
 
