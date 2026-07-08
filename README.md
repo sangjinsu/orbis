@@ -54,7 +54,7 @@ flowchart LR
 
 | Package | Responsibility |
 | --- | --- |
-| `cmd/orbis` | CLI entrypoint: `serve`, `ws smoke [tool\|skill]`, `skills`, `proposal`, `watch` |
+| `cmd/orbis` | CLI entrypoint: `serve`, `ws smoke [tool\|skill]`, `chat`, `skills`, `proposal`, `watch` |
 | `internal/app` | runtime service 조립과 WebSocket method 처리 |
 | `internal/domain` | event, action, run, session 등 안정적인 domain type |
 | `internal/runtime` | reducer, dispatcher, session lane, loop coordination |
@@ -200,6 +200,31 @@ go run ./cmd/orbis ws smoke skill    # skill selection + injection path
 
 smoke client는 `session.subscribe` 후 `session.message`를 보내고, ACK와 event
 이름을 출력합니다. `RunCompleted`까지 도달하지 못하면 실패합니다.
+
+## Interactive Chat
+
+서버를 켠 상태에서 터미널에서 바로 runtime과 대화할 수 있습니다.
+
+```bash
+go run ./cmd/orbis chat
+```
+
+```text
+session chat_a1b2c3d4 — /quit to leave (reattach later with --session chat_a1b2c3d4)
+you> Use the math.add tool to add 20 and 22, then reply with just the number.
+[skill] tool-calling-policy
+[tool] math.add {"a":20,"b":22}
+[tool] math.add ok (0ms)
+orbis> 42
+you> /quit
+```
+
+- assistant 답변은 `AssistantDelta`로 실시간 스트리밍되고, tool 호출·skill 적용은
+  한 줄 노트로 표시됩니다. `--quiet`는 답변 텍스트만, `--verbose`는 모든 runtime
+  event를 보여줍니다.
+- `--session <id>`로 기존 session에 다시 붙으면 서버가 보관한 대화 이력 위에서
+  이어서 대화합니다.
+- REPL 명령: `/quit`(종료), `/session`(현재 session id 출력).
 
 ## Learning-loop CLI
 

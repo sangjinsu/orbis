@@ -25,6 +25,7 @@ func newRootCmd() *cobra.Command {
 		newSkillsCmd(),
 		newProposalCmd(),
 		newWatchCmd(),
+		newChatCmd(),
 	)
 	return root
 }
