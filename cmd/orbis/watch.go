@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"strings"
@@ -12,6 +11,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 	"github.com/sangjinsu/orbis/internal/protocol"
+	"github.com/spf13/cobra"
 )
 
 type watchConfig struct {
@@ -22,21 +22,28 @@ type watchConfig struct {
 	Timeout time.Duration
 }
 
-// watchMain dispatches `orbis watch`. The global feed is not auth-gated, so
-// there is no -token flag.
-func watchMain(ctx context.Context, args []string, out io.Writer) error {
-	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
-	addr := fs.String("addr", "", "server address (default $ORBIS_ADDR or :8080)")
-	asJSON := fs.Bool("json", false, "print raw runtime events as NDJSON")
-	timeout := fs.Duration("timeout", 0, "stop watching after this duration (0 = until Ctrl-C)")
-	if err := fs.Parse(args); err != nil {
-		return errUsage
+// newWatchCmd builds `orbis watch`. The global feed is not auth-gated, so
+// there is no --token flag.
+func newWatchCmd() *cobra.Command {
+	var addr string
+	var asJSON bool
+	var timeout time.Duration
+	cmd := &cobra.Command{
+		Use:   "watch",
+		Short: "Stream the global skill lifecycle feed",
+		Args:  exactArgs(0, "orbis watch"),
+		RunE: func(c *cobra.Command, _ []string) error {
+			return runWatch(c.Context(), watchConfig{
+				URL:     wsURLFromAddr(resolveAddr(addr)),
+				JSON:    asJSON,
+				Timeout: timeout,
+			}, c.OutOrStdout())
+		},
 	}
-	return runWatch(ctx, watchConfig{
-		URL:     wsURLFromAddr(resolveAddr(*addr)),
-		JSON:    *asJSON,
-		Timeout: *timeout,
-	}, out)
+	cmd.Flags().StringVar(&addr, "addr", "", "server address (default $ORBIS_ADDR or :8080)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print raw runtime events as NDJSON")
+	cmd.Flags().DurationVar(&timeout, "timeout", 0, "stop watching after this duration (0 = until Ctrl-C)")
+	return cmd
 }
 
 // runWatch subscribes to the session-independent global feed (the eleven

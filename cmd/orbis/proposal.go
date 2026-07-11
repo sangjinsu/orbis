@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,80 +10,104 @@ import (
 	"text/tabwriter"
 
 	"github.com/sangjinsu/orbis/internal/protocol"
+	"github.com/spf13/cobra"
 )
 
-const proposalUsage = "orbis proposal list [-status <s>] | get <id> | create <runID> | edit <id> [field flags] | approve <id> | reject <id> [-reason <r>]  [-addr] [-token] [-json] [-timeout]"
-
-// proposalMain dispatches `orbis proposal <verb>`. Positional ids come before
-// flags because std flag stops parsing at the first non-flag.
-func proposalMain(ctx context.Context, args []string, out io.Writer) error {
-	if len(args) < 1 {
-		return usagef(proposalUsage)
+func newProposalCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "proposal",
+		Short: "Review skill proposals (list, edit, approve, reject)",
 	}
-	sub, rest := args[0], args[1:]
+	common := registerCommon(cmd)
 
-	var id string
-	switch sub {
-	case "get", "create", "edit", "approve", "reject":
-		if len(rest) < 1 || strings.HasPrefix(rest[0], "-") {
-			return usagef("orbis proposal %s <id> [flags]", sub)
-		}
-		id, rest = rest[0], rest[1:]
+	var status string
+	list := &cobra.Command{
+		Use:   "list",
+		Short: "List proposals, optionally filtered by status",
+		Args:  exactArgs(0, "orbis proposal list [--status s]"),
+		RunE: func(c *cobra.Command, _ []string) error {
+			return runProposalList(c.Context(), common.client(), status, common.asJSON, c.OutOrStdout())
+		},
+	}
+	list.Flags().StringVar(&status, "status", "", "filter by status (pending, approved, rejected, promoted, failed)")
+
+	get := &cobra.Command{
+		Use:   "get <proposalID>",
+		Short: "Show one proposal including its rendered body",
+		Args:  exactArgs(1, "orbis proposal get <proposalID>"),
+		RunE: func(c *cobra.Command, args []string) error {
+			return runProposalGet(c.Context(), common.client(), args[0], common.asJSON, c.OutOrStdout())
+		},
 	}
 
-	fs := flag.NewFlagSet("proposal "+sub, flag.ContinueOnError)
-	common := registerCommon(fs)
-	status := fs.String("status", "", "filter by status (pending, approved, rejected, promoted, failed)")
-	reason := fs.String("reason", "", "rejection reason")
-	title := fs.String("title", "", "replace the title")
-	purpose := fs.String("purpose", "", "replace the purpose")
-	whenToUse := fs.String("when-to-use", "", "replace the when-to-use guidance")
+	create := &cobra.Command{
+		Use:   "create <runID>",
+		Short: "Create a proposal from a completed run (reviewer+)",
+		Args:  exactArgs(1, "orbis proposal create <runID>"),
+		RunE: func(c *cobra.Command, args []string) error {
+			return runProposalCreate(c.Context(), common.client(), args[0], common.asJSON, c.OutOrStdout())
+		},
+	}
+
+	var title, purpose, whenToUse string
 	var requiredContext, procedure, relatedTools, verification, pitfalls stringList
-	fs.Var(&requiredContext, "required-context", "replace required context (repeatable; one empty value clears)")
-	fs.Var(&procedure, "procedure", "replace procedure steps (repeatable; one empty value clears)")
-	fs.Var(&relatedTools, "related-tools", "replace related tools (repeatable; one empty value clears)")
-	fs.Var(&verification, "verification", "replace verification steps (repeatable; one empty value clears)")
-	fs.Var(&pitfalls, "pitfalls", "replace pitfalls (repeatable; one empty value clears)")
-	if err := fs.Parse(rest); err != nil {
-		return errUsage
-	}
-	client := common.client()
-
-	switch sub {
-	case "list":
-		return runProposalList(ctx, client, *status, common.asJSON, out)
-	case "get":
-		return runProposalGet(ctx, client, id, common.asJSON, out)
-	case "create":
-		return runProposalCreate(ctx, client, id, common.asJSON, out)
-	case "edit":
-		var fields protocol.SkillProposalUpdateRequest
-		fs.Visit(func(f *flag.Flag) {
-			switch f.Name {
-			case "title":
-				fields.Title = title
-			case "purpose":
-				fields.Purpose = purpose
-			case "when-to-use":
-				fields.WhenToUse = whenToUse
+	edit := &cobra.Command{
+		Use:   "edit <proposalID>",
+		Short: "Edit a pending proposal's structured fields (reviewer+)",
+		Args:  exactArgs(1, "orbis proposal edit <proposalID> [field flags]"),
+		RunE: func(c *cobra.Command, args []string) error {
+			var fields protocol.SkillProposalUpdateRequest
+			if c.Flags().Changed("title") {
+				fields.Title = &title
 			}
-		})
-		fields.RequiredContext = requiredContext.toPtr()
-		fields.Procedure = procedure.toPtr()
-		fields.RelatedTools = relatedTools.toPtr()
-		fields.Verification = verification.toPtr()
-		fields.Pitfalls = pitfalls.toPtr()
-		if fields == (protocol.SkillProposalUpdateRequest{}) {
-			return usagef("orbis proposal edit <id> needs at least one field flag (-title, -purpose, -when-to-use, -required-context, -procedure, -related-tools, -verification, -pitfalls)")
-		}
-		return runProposalEdit(ctx, client, id, fields, common.asJSON, out)
-	case "approve":
-		return runProposalApprove(ctx, client, id, common.asJSON, out)
-	case "reject":
-		return runProposalReject(ctx, client, id, *reason, common.asJSON, out)
-	default:
-		return usagef(proposalUsage)
+			if c.Flags().Changed("purpose") {
+				fields.Purpose = &purpose
+			}
+			if c.Flags().Changed("when-to-use") {
+				fields.WhenToUse = &whenToUse
+			}
+			fields.RequiredContext = requiredContext.toPtr()
+			fields.Procedure = procedure.toPtr()
+			fields.RelatedTools = relatedTools.toPtr()
+			fields.Verification = verification.toPtr()
+			fields.Pitfalls = pitfalls.toPtr()
+			if fields == (protocol.SkillProposalUpdateRequest{}) {
+				return fmt.Errorf("%w: orbis proposal edit <id> needs at least one field flag (--title, --purpose, --when-to-use, --required-context, --procedure, --related-tools, --verification, --pitfalls)", errUsage)
+			}
+			return runProposalEdit(c.Context(), common.client(), args[0], fields, common.asJSON, c.OutOrStdout())
+		},
 	}
+	edit.Flags().StringVar(&title, "title", "", "replace the title")
+	edit.Flags().StringVar(&purpose, "purpose", "", "replace the purpose")
+	edit.Flags().StringVar(&whenToUse, "when-to-use", "", "replace the when-to-use guidance")
+	edit.Flags().Var(&requiredContext, "required-context", "replace required context (repeatable; one empty value clears)")
+	edit.Flags().Var(&procedure, "procedure", "replace procedure steps (repeatable; one empty value clears)")
+	edit.Flags().Var(&relatedTools, "related-tools", "replace related tools (repeatable; one empty value clears)")
+	edit.Flags().Var(&verification, "verification", "replace verification steps (repeatable; one empty value clears)")
+	edit.Flags().Var(&pitfalls, "pitfalls", "replace pitfalls (repeatable; one empty value clears)")
+
+	approve := &cobra.Command{
+		Use:   "approve <proposalID>",
+		Short: "Approve and promote a pending proposal (reviewer+)",
+		Args:  exactArgs(1, "orbis proposal approve <proposalID>"),
+		RunE: func(c *cobra.Command, args []string) error {
+			return runProposalApprove(c.Context(), common.client(), args[0], common.asJSON, c.OutOrStdout())
+		},
+	}
+
+	var reason string
+	reject := &cobra.Command{
+		Use:   "reject <proposalID>",
+		Short: "Reject a pending proposal (reviewer+)",
+		Args:  exactArgs(1, "orbis proposal reject <proposalID> [--reason r]"),
+		RunE: func(c *cobra.Command, args []string) error {
+			return runProposalReject(c.Context(), common.client(), args[0], reason, common.asJSON, c.OutOrStdout())
+		},
+	}
+	reject.Flags().StringVar(&reason, "reason", "", "rejection reason")
+
+	cmd.AddCommand(list, get, create, edit, approve, reject)
+	return cmd
 }
 
 func runProposalList(ctx context.Context, c *apiClient, status string, asJSON bool, out io.Writer) error {
