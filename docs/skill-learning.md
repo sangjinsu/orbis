@@ -157,12 +157,37 @@ POST  /skills/reload                         # reload the index (admin as of v2)
 ```
 skill.proposal.list             params: {"status": "..."}            (open)
 skill.proposal.get              params: {"proposal_id": "..."}       (open)
-skill.proposal.create_from_run  params: {"run_id","token"}           (admin)
-skill.proposal.update           params: {"proposal_id","token",<fields>} (admin)
-skill.proposal.approve          params: {"proposal_id","token"}      (admin)
-skill.proposal.reject           params: {"proposal_id","reason","token"} (admin)
-skill.reload                    params: {"token"}                    (admin as of v2)
+skill.proposal.create_from_run  params: {"run_id","token"}           (reviewer+)
+skill.proposal.update           params: {"proposal_id","token",<fields>} (reviewer+)
+skill.proposal.approve          params: {"proposal_id","token"}      (reviewer+)
+skill.proposal.reject           params: {"proposal_id","reason","token"} (reviewer+)
+skill.reload                    params: {"token"}                    (admin)
 ```
+
+## CLI
+
+Every endpoint above has an `orbis` subcommand, so the loop can be driven
+without curl. `-addr` defaults to `$ORBIS_ADDR` then `:8080`; the bearer token
+comes from `-token` or `$ORBIS_TOKEN`; `-json` prints the raw response.
+
+| Command | Endpoint | Auth |
+|---|---|---|
+| `orbis skills list` | `GET /skills` | open |
+| `orbis skills get <skillID>` | `GET /skills/{skillID}` | open |
+| `orbis skills reload` | `POST /skills/reload` | admin |
+| `orbis proposal list [-status s]` | `GET /skill-proposals?status=` | open |
+| `orbis proposal get <id>` | `GET /skill-proposals/{id}` | open |
+| `orbis proposal create <runID>` | `POST /runs/{runID}/skill-proposals` | reviewer+ |
+| `orbis proposal edit <id> [field flags]` | `PATCH /skill-proposals/{id}` | reviewer+ |
+| `orbis proposal approve <id>` | `POST /skill-proposals/{id}/approve` | reviewer+ |
+| `orbis proposal reject <id> [-reason r]` | `POST /skill-proposals/{id}/reject` | reviewer+ |
+| `orbis watch [-json]` | WS `session.subscribe` `{"scope":"global"}` | open |
+
+`proposal edit` maps only the flags you pass onto the PATCH body: scalar
+fields via `-title` / `-purpose` / `-when-to-use`, list fields via repeatable
+flags (`-procedure "step one" -procedure "step two"`); passing a list flag
+once with an empty value clears the list. `orbis watch` streams the global
+lifecycle feed until Ctrl-C (or `-timeout`).
 
 ## Reviewer edits (v2.1)
 
@@ -225,15 +250,16 @@ value collides — that fails config loading loudly. For local development set
 ## Manual test
 
 ```bash
-go run ./cmd/orbis serve            # .env with a real provider + ORBIS_ADMIN_TOKEN
-go run ./cmd/orbis ws smoke tool    # completes a run that used tools + skills
+go run ./cmd/orbis serve            # .env with a real provider + tokens
+go run ./cmd/orbis watch            # terminal 2: stream the global feed
+go run ./cmd/orbis ws smoke tool    # terminal 3: a run that used tools + skills
 
-curl -X POST http://localhost:8080/runs/run_smoke_msg/skill-proposals \
-  -H "Authorization: Bearer dev-orbis-admin"
-curl http://localhost:8080/skill-proposals?status=pending
-curl -X POST http://localhost:8080/skill-proposals/prop_run_smoke_msg/approve \
-  -H "Authorization: Bearer dev-orbis-admin"
-curl http://localhost:8080/skills    # promoted skill served by the reloaded catalog
+export ORBIS_TOKEN=dev-orbis-admin  # or -token per command
+go run ./cmd/orbis proposal create run_smoke_msg
+go run ./cmd/orbis proposal list -status pending
+go run ./cmd/orbis proposal edit prop_run_smoke_msg -title "Sharper title"
+go run ./cmd/orbis proposal approve prop_run_smoke_msg
+go run ./cmd/orbis skills list      # promoted skill served by the reloaded catalog
 ```
 
 Then inspect `data/skill_proposals/`, `data/skills/index.json`, and

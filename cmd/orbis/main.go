@@ -82,6 +82,25 @@ func main() {
 			slog.Error("websocket smoke failed", "error", err)
 			os.Exit(1)
 		}
+	case "skills", "proposal", "watch":
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		var err error
+		switch os.Args[1] {
+		case "skills":
+			err = skillsMain(ctx, os.Args[2:], os.Stdout)
+		case "proposal":
+			err = proposalMain(ctx, os.Args[2:], os.Stdout)
+		case "watch":
+			err = watchMain(ctx, os.Args[2:], os.Stdout)
+		}
+		if errors.Is(err, errUsage) {
+			os.Exit(2)
+		}
+		if err != nil {
+			slog.Error(os.Args[1]+" failed", "error", err)
+			os.Exit(1)
+		}
 	default:
 		printUsage()
 		os.Exit(2)
@@ -89,5 +108,13 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, "usage: orbis serve | orbis ws smoke [tool|skill]")
+	fmt.Fprintln(os.Stderr, `usage:
+  orbis serve
+  orbis ws smoke [tool|skill]
+  orbis skills list | get <skillID> | reload
+  orbis proposal list | get <id> | create <runID> | edit <id> | approve <id> | reject <id>
+  orbis watch
+
+common flags: -addr <host:port> -token <bearer> -json -timeout <dur>
+environment:  ORBIS_ADDR (server address), ORBIS_TOKEN (bearer token)`)
 }
