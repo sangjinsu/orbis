@@ -18,13 +18,20 @@ LLM은 loop 자체가 아니라 worker 중 하나입니다.
 - v0.1 runtime kernel: session lane, reducer, dispatcher, worker, broker, JSONL persistence
 - v0.2 tool calling: mock tool registry, policy, idempotency, retry, timeout, result events
 - v1 skills: run 시작 시 procedural knowledge를 선택해 LLM context에 주입
-- v2 skill learning: run으로부터 reviewable proposal을 만들고, admin 승인 후 seed skill로 promotion
+- v1.5 runtime hardening: policy denial을 bounded budget 안에서 LLM에 돌려줘 재계획하고,
+  사용 가능한 tool을 skill selection signal로 반영
+- v2 skill learning: run으로부터 reviewable proposal을 만들고, 명시적 human review 후
+  active skill로 promotion
+- v2.1 learning-loop hardening: learned-skill version bump/archive, reviewer edit,
+  session-independent global lifecycle feed, named reviewer/admin token role
+- Cobra operational CLI: `serve`, `ws`, `skills`, `proposal`, `watch`
+- interactive `chat`: streaming answer, tool/skill activity, session reattach를 지원하는 REPL
 - `/debug`: 실제 WebSocket event stream을 그래픽으로 확인하는 runtime visualizer
 
 ## 아키텍처
 
-Orbis는 v0.x에서 modular monolith로 유지합니다. 하나의 Go process 안에서 package
-boundary를 분리하고, 외부 broker나 microservice는 아직 도입하지 않습니다.
+현재 v2.1 + CLI baseline은 modular monolith입니다. 하나의 Go process 안에서 package
+boundary를 분리하며, 외부 broker나 microservice는 도입하지 않습니다.
 
 ```mermaid
 flowchart LR
@@ -126,7 +133,7 @@ tool call prompt에서는 중간에 `ToolCallStarted`, `ToolCallSucceeded`,
 
 ## 시작하기
 
-Go 1.22+ 환경을 권장합니다.
+Go 1.26.4 이상이 필요합니다.
 
 ```bash
 go test ./...
@@ -234,10 +241,10 @@ skill 학습 루프는 curl 없이 CLI로 조작할 수 있습니다. 주소는 
 ```bash
 go run ./cmd/orbis watch                                  # 글로벌 이벤트 피드 스트림
 go run ./cmd/orbis proposal list --status pending
-go run ./cmd/orbis proposal edit prop_x --title "..." --token <reviewer-token>
-go run ./cmd/orbis proposal approve prop_x --token <reviewer-token>
+go run ./cmd/orbis proposal edit prop_x --title "..." --token '<reviewer-token>'
+go run ./cmd/orbis proposal approve prop_x --token '<reviewer-token>'
 go run ./cmd/orbis skills list                            # 승격된 skill 확인
-go run ./cmd/orbis skills reload --token <admin-token>
+go run ./cmd/orbis skills reload --token '<admin-token>'
 ```
 
 전체 커맨드↔엔드포인트 매핑은 `docs/skill-learning.md`의 CLI 섹션을 참고하세요.
@@ -281,9 +288,13 @@ POST /skills/reload
 GET  /skill-proposals?status=pending
 GET  /skill-proposals/{proposalID}
 POST /runs/{runID}/skill-proposals
+PATCH /skill-proposals/{proposalID}
 POST /skill-proposals/{proposalID}/approve
 POST /skill-proposals/{proposalID}/reject
 ```
+
+proposal 생성·수정·승인·거절은 `reviewer` 이상 역할이 필요하고,
+operational `skills reload`는 `admin` 역할만 허용합니다. 읽기 API는 열려 있습니다.
 
 주요 WebSocket method:
 
@@ -301,7 +312,7 @@ skill catalog method는 read-only입니다. `skill.reload`는 admin token이 필
 ```json
 {"type":"req","id":"sk_1","method":"skill.list"}
 {"type":"req","id":"sk_2","method":"skill.get","params":{"skill_id":"websocket-runtime-test"}}
-{"type":"req","id":"sk_3","method":"skill.reload","params":{"token":"dev-orbis-admin"}}
+{"type":"req","id":"sk_3","method":"skill.reload","params":{"token":"<admin-token>"}}
 ```
 
 ## Skills
@@ -364,13 +375,20 @@ open http://127.0.0.1:8080/debug
 
 ## Non-goals
 
-v0.x에서는 다음을 의도적으로 제외합니다.
+현재 shipped baseline은 runtime kernel, tool calling, deterministic skill selection,
+reviewable learning loop, v2.1 hardening, operational CLI, interactive chat, debug
+visualizer까지 포함합니다. 다음 항목은 accepted milestone과 decision record가 생기기
+전까지 deferred 상태입니다.
 
-- OpenClaw/Hermes compatibility layer
-- Slack/Telegram/Discord gateway
+- unreviewed automatic skill promotion or self-modification
+- vector or semantic skill search
+- subagents
 - MCP integration
-- distributed queue or external broker
+- Slack/Telegram/Discord 같은 multi-channel gateway
+- distributed broker or worker
 - Kubernetes deployment
-- long-term memory system beyond current skill proposal flow
+- full OpenClaw/Hermes compatibility
+- durable task board or advanced long-term memory
 
-Orbis의 우선순위는 작은 runtime kernel을 안정적으로 완성하는 것입니다.
+다음 product milestone은 아직 선택되지 않았으며, 위 항목은 roadmap commitment가
+아닙니다.

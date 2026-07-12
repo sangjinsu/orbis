@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft
+Accepted — historical baseline; the event rules remain current
 
 ## Purpose
 

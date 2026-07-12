@@ -2,8 +2,8 @@
 
 Orbis v2 adds a **reviewable skill learning loop**: the runtime can derive a
 **Skill Proposal** from a completed run, but a proposal only becomes an active
-skill through an explicit, admin-authenticated human approval. Nothing is ever
-promoted automatically.
+skill through explicit human approval by a `reviewer` or `admin`. Nothing is
+ever promoted automatically.
 
 The three states are strictly distinct:
 
@@ -23,12 +23,12 @@ RunCompleted
   -> SkillProposalCreated        (pending, under data/skill_proposals/pending/)
   -> SkillReviewRequired
        │
-       ├─ approve (admin) ─▶ SkillProposalApproved -> SkillPromoted
+       ├─ approve (reviewer+) ─▶ SkillProposalApproved -> SkillPromoted
        │                     -> SkillIndexReloadRequested -> SkillIndexReloaded
        │                     -> SkillAuditRecorded
        │     └─ on failure ─▶ SkillPromotionFailed -> SkillAuditRecorded
        │                       (proposal marked failed; may be retried)
-       └─ reject (admin)  ─▶ SkillProposalRejected -> SkillAuditRecorded
+       └─ reject (reviewer+)  ─▶ SkillProposalRejected -> SkillAuditRecorded
 ```
 
 The status machine has **no pending → promoted path**: only a pending proposal
@@ -47,7 +47,7 @@ promoted), a concise `rationale_summary`, and the source run/event ids.
 Two triggers exist:
 
 - **Manual** (primary): `POST /runs/{runID}/skill-proposals` or WS
-  `skill.proposal.create_from_run` — admin-gated.
+  `skill.proposal.create_from_run` — `reviewer` or `admin` required.
 - **Auto-propose** (optional, `ORBIS_SKILL_AUTO_PROPOSE`, default **false**): a
   post-run hook creates a pending proposal from qualifying completed runs. It
   only ever creates; it never approves or promotes.
@@ -75,11 +75,11 @@ queue. Statuses: `pending`, `approved`, `rejected`, `promoted`, `failed`.
 
 ## Approval, rejection, promotion
 
-Approving a pending proposal (admin-gated) runs the full flow: the proposal is
-marked approved, the promoter writes `data/skills/{skill_id}.md` and appends an
-`index.json` entry, the proposal is marked promoted, and the in-memory skill
-index reloads so the new skill is immediately selectable. Rejection marks the
-proposal rejected and stops there.
+Approving a pending proposal (`reviewer` or `admin` required) runs the full
+flow: the proposal is marked approved, the promoter writes
+`data/skills/{skill_id}.md` and appends an `index.json` entry, the proposal is
+marked promoted, and the in-memory skill index reloads so the new skill is
+immediately selectable. Rejection marks the proposal rejected and stops there.
 
 A promoted skill's index entry records:
 
@@ -109,11 +109,14 @@ Every lifecycle transition appends a JSONL record to
 `data/audit/skill_audit.jsonl`:
 
 ```json
-{"audit_id":"...","event_type":"SkillPromoted","proposal_id":"...","skill_id":"...","source_run_id":"...","actor":"admin","timestamp":"...","summary":"proposal promoted to skill ..."}
+{"audit_id":"...","event_type":"SkillPromoted","proposal_id":"...","skill_id":"...","source_run_id":"...","actor":"alice","timestamp":"...","summary":"proposal promoted to skill ..."}
 ```
 
-Actors are `system`, `admin`, `developer`, or `unknown`. Audit records carry a
-short user-visible summary only — never secrets or hidden reasoning.
+Authenticated mutations record the principal's configured name as the audit
+actor. The auto-propose hook uses `system`, an empty actor falls back to
+`unknown`, and the legacy `ORBIS_ADMIN_TOKEN` principal is named `admin`. Audit
+records carry a short user-visible summary only — never secrets or hidden
+reasoning.
 
 ## Events
 
@@ -145,11 +148,11 @@ reload events stay on the source session and the global feed as before.
 ```
 GET   /skill-proposals?status=pending        # list (open)
 GET   /skill-proposals/{proposalID}          # detail incl. body (open), 404 unknown
-POST  /runs/{runID}/skill-proposals          # create from run (admin), 201
-PATCH /skill-proposals/{proposalID}          # edit a pending proposal (admin)
-POST  /skill-proposals/{proposalID}/approve  # approve + promote + reload (admin)
-POST  /skill-proposals/{proposalID}/reject   # reject, body {"reason": "..."} (admin)
-POST  /skills/reload                         # reload the index (admin as of v2)
+POST  /runs/{runID}/skill-proposals          # create from run (reviewer+), 201
+PATCH /skill-proposals/{proposalID}          # edit a pending proposal (reviewer+)
+POST  /skill-proposals/{proposalID}/approve  # approve + promote + reload (reviewer+)
+POST  /skill-proposals/{proposalID}/reject   # reject, body {"reason": "..."} (reviewer+)
+POST  /skills/reload                         # operational reload (admin)
 ```
 
 ## WebSocket methods
@@ -181,7 +184,7 @@ comes from `--token` or `$ORBIS_TOKEN`; `--json` prints the raw response.
 | `orbis proposal edit <id> [field flags]` | `PATCH /skill-proposals/{id}` | reviewer+ |
 | `orbis proposal approve <id>` | `POST /skill-proposals/{id}/approve` | reviewer+ |
 | `orbis proposal reject <id> [--reason r]` | `POST /skill-proposals/{id}/reject` | reviewer+ |
-| `orbis watch [-json]` | WS `session.subscribe` `{"scope":"global"}` | open |
+| `orbis watch --json` | WS `session.subscribe` `{"scope":"global"}` | open |
 
 `proposal edit` maps only the flags you pass onto the PATCH body: scalar
 fields via `--title` / `--purpose` / `--when-to-use`, list fields via repeatable
@@ -201,7 +204,7 @@ proposal, so an edited proposal can never drift from what promotion writes.
 
 ```
 PATCH /skill-proposals/{proposalID}
-Authorization: Bearer <token>
+Authorization: Bearer <reviewer-token>
 {"title": "Sharper title", "procedure": ["step one", "step two"]}
 ```
 
@@ -216,7 +219,7 @@ edited — approved, rejected, promoted, and failed proposals are immutable.
 Mutating operations require a named bearer token with a sufficient role:
 
 ```
-ORBIS_AUTH_TOKENS=alice:admin:atok,bob:reviewer:rtok
+ORBIS_AUTH_TOKENS=alice:admin:<admin-token>,bob:reviewer:<reviewer-token>
 ```
 
 - Each entry is `name:role:token` (comma-separated; the token part may contain
@@ -235,7 +238,7 @@ ORBIS_AUTH_TOKENS=alice:admin:atok,bob:reviewer:rtok
 The legacy `ORBIS_ADMIN_TOKEN` still works: it is merged in as an admin-role
 token named `admin`. Setting both is fine unless the name `admin` or the token
 value collides — that fails config loading loudly. For local development set
-`ORBIS_ADMIN_TOKEN=dev-orbis-admin` or a full `ORBIS_AUTH_TOKENS`.
+`ORBIS_ADMIN_TOKEN=<admin-token>` or, preferably, a full `ORBIS_AUTH_TOKENS`.
 
 ## Configuration
 
@@ -254,7 +257,7 @@ go run ./cmd/orbis serve            # .env with a real provider + tokens
 go run ./cmd/orbis watch            # terminal 2: stream the global feed
 go run ./cmd/orbis ws smoke tool    # terminal 3: a run that used tools + skills
 
-export ORBIS_TOKEN=dev-orbis-admin  # or --token per command
+export ORBIS_TOKEN='<reviewer-token>'  # or --token per command
 go run ./cmd/orbis proposal create run_smoke_msg
 go run ./cmd/orbis proposal list --status pending
 go run ./cmd/orbis proposal edit prop_run_smoke_msg --title "Sharper title"

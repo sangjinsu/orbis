@@ -4,6 +4,15 @@
 
 Accepted
 
+## Historical Supersession Note
+
+This accepted spec preserves the v1 skill-system contract. Its three-seed
+inventory is no longer a fixed catalog size because later approved proposals
+can add learned skills. Its Non-Goals and `Close()` follow-ups describe the v1
+boundary: v1.5 wired production shutdown and tool-aware selection, v2/v2.1
+shipped reviewable learning and role-based reload auth, and v2.1 made snapshot
+writes atomic.
+
 ## Purpose
 
 Introduce skills: reusable procedural knowledge loaded into the LLM context
@@ -134,7 +143,7 @@ publication. Manual/e2e uses the real LLM via `orbis ws smoke skill`.
 
 ## Open Questions
 
-- Should related tool names (`SelectionInput.ToolNames`) influence scoring? Wired
-  through but unused in v1.
-- Should `reload` be authenticated separately from read endpoints once the
-  gateway gains auth?
+- Resolved in v1.5: enabled related tool names influence scoring through the
+  `tool_available` reason.
+- Resolved in v2/v2.1: reads remain open, while reload requires the `admin`
+  role; see `v2.1-learning-loop-hardening.md`.

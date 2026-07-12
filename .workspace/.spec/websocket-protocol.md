@@ -2,11 +2,12 @@
 
 ## Status
 
-Draft
+Accepted — current behavior through the v2.1 + CLI baseline
 
 ## Purpose
 
-Define the minimal request, response, and event envelopes for v0.1 runtime testing.
+Define the implemented request, response, and event envelopes used by the
+current runtime, operational CLI, and interactive chat surfaces.
 
 ## Client Request
 
@@ -57,6 +58,19 @@ Define the minimal request, response, and event envelopes for v0.1 runtime testi
 - `run.cancel`
 - `run.status`
 - `events.list`
+- `skill.list`
+- `skill.get`
+- `skill.reload`
+- `skill.proposal.list`
+- `skill.proposal.get`
+- `skill.proposal.create_from_run`
+- `skill.proposal.update`
+- `skill.proposal.approve`
+- `skill.proposal.reject`
+
+Feature-specific payloads and authorization rules remain defined in
+`v1-skill-system.md`, `v2-skill-learning-loop.md`, and
+`v2.1-learning-loop-hardening.md`; they are not duplicated here.
 
 ### `session.create`
 

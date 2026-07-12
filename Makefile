@@ -7,7 +7,8 @@ run:
 	go run ./cmd/orbis serve
 
 lint:
-	go test ./...
+	test -z "$$(gofmt -l .)"
+	go vet ./...
 
 smoke:
 	go run ./cmd/orbis ws smoke

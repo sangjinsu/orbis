@@ -4,37 +4,39 @@
 
 Orbis Agent Runtime is a Go-based event-loop-first runtime for long-running AI agents.
 
-## Current Goal
+## Current Baseline
 
-Build the v0.1 runtime kernel with WebSocket-based real LLM communication testing.
+`main` has shipped v0.1 through v2.1. The current operational baseline includes:
+
+- the runtime kernel, tool calling, cancellation, timeout, persistence, and observable WebSocket events
+- deterministic skill selection and bounded context injection
+- reviewable skill proposals with explicit approval, versioned promotion, audit, and named reviewer/admin roles
+- the runtime debug visualizer
+- Cobra commands for server and smoke operation, skills, proposals, the global feed, and interactive chat
 
 ## Core Principle
 
 The runtime owns the loop. The LLM is only one worker in the loop.
 
-## Architecture
+## Current Architecture
 
-Orbis uses a modular monolith architecture: one Go process with clear internal package boundaries.
+Orbis is a modular monolith: one Go process with clear domain, runtime, worker,
+gateway, store, broker, protocol, skill, auth, observability, and configuration
+boundaries. It uses goroutines, channels, `select`, `context.Context`, session
+lane ordering, worker-owned side effects, and file-based JSON/JSONL persistence.
 
-## Implementation Direction
+## Next Milestone
 
-Use Go-native concurrency:
-
-- goroutines
-- channels
-- `select`
-- `context.Context`
-- worker boundaries
-- session lane ordering
-- WebSocket event streams
+No next product milestone has been selected. Candidate work is not a commitment
+until an accepted spec and decision record define it.
 
 ## Current Non-Goals
 
-- OpenClaw compatibility
-- Hermes compatibility
-- multi-channel messenger gateway
-- skills
-- tool search
+- unreviewed automatic skill promotion or self-modification
+- vector or semantic search
 - subagents
-- durable task board
-- distributed queue
+- MCP integration
+- multi-channel messenger gateways
+- distributed brokers or workers
+- Kubernetes deployment
+- full OpenClaw or Hermes compatibility

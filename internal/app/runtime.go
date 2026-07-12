@@ -55,7 +55,6 @@ type RuntimeService struct {
 	lanes       map[string]*orbisruntime.SessionLane
 	eventQueues map[string]chan domain.Event
 	dispatcher  *orbisruntime.Dispatcher
-	llmProvider worker.LLMProvider
 	reducerCfg  orbisruntime.ReducerConfig
 	skills      SkillCatalog
 	proposals   *skill.ProposalStore
@@ -124,7 +123,6 @@ func NewRuntimeService(cfg RuntimeServiceConfig) *RuntimeService {
 		now:         now,
 		lanes:       map[string]*orbisruntime.SessionLane{},
 		eventQueues: map[string]chan domain.Event{},
-		llmProvider: cfg.LLMProvider,
 		reducerCfg:  cfg.ReducerConfig,
 		skills:      cfg.SkillCatalog,
 		proposals:   cfg.ProposalStore,

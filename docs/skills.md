@@ -124,6 +124,9 @@ HTTP endpoints (registered only when skills are enabled):
 - `GET /skills/{skillID}` → `200` detail, or `404` when unknown
 - `POST /skills/reload` → `200` `{ count }`, or `500` on a reload error
 
+Catalog reads are open. Reload is an operational mutation and requires the
+`admin` role.
+
 ## Configuration
 
 - `ORBIS_SKILLS_ENABLED` (default `true`) — when false, the reducer skips
@@ -131,7 +134,10 @@ HTTP endpoints (registered only when skills are enabled):
 - `ORBIS_SKILLS_DIR` (default `data/skills`)
 - `ORBIS_SKILLS_MAX_SELECTED` (default `3`)
 - `ORBIS_SKILLS_MAX_CHARS` (default `12000`)
-- `ORBIS_SKILLS_RELOAD_ON_START` (default `true`)
+
+Compatibility: `ORBIS_SKILLS_RELOAD_ON_START` was removed because it was a
+no-op. Existing environments may leave it set; the config loader ignores it as
+an unknown key, and startup still loads the catalog through `skill.NewStore`.
 
 ## Seed skills
 
@@ -146,20 +152,30 @@ HTTP endpoints (registered only when skills are enabled):
 - `runtime-debug` (64) — how to debug Orbis event flow through `/debug` and streams.
 - `test-plan` (62) — how to define verification and smoke-test steps.
 
+Proposal creation, reviewer edits, approval, versioned promotion, audit, and
+named-role auth are summarized in [skill-learning.md](skill-learning.md).
+
 ## Limits (v1)
 
 - A `reload` during an in-flight run does not change that run's already-selected
   skills (the run keeps its snapshot; `content_hash` is the drift record).
 - Selection is substring-based; there is no embedding/vector search.
 - `SelectionInput.ToolNames` can boost skills whose `related_tools` are enabled.
-- Skills are never created or edited by the runtime.
+- The runtime may create reviewable proposals, and a `reviewer` or `admin` may
+  edit a pending proposal. No proposal is promoted without explicit approval;
+  unreviewed promotion and self-modification remain forbidden.
 
-## Non-goals / follow-ups
+## Shutdown
 
-Auto skill creation, a self-learning loop, a skill-write approval UI, tool
-search, subagents, vector search/embeddings, MCP, a multi-channel gateway,
-Level 2 skill assets, and dynamic mid-run skill changes are out of scope for v1.
-Wiring `RuntimeService.Close()` into HTTP server shutdown is also follow-up work.
+Production shutdown wiring is complete: `orbis serve` first calls
+`http.Server.Shutdown()` and then `RuntimeService.Close()` to drain runtime
+background work.
+
+## Non-goals
+
+Unreviewed automatic promotion, autonomous self-modification, tool search,
+subagents, vector search/embeddings, MCP, a multi-channel gateway, Level 2 skill
+assets, and dynamic mid-run skill changes remain deferred.
 
 ## Manual test
 

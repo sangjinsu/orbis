@@ -42,11 +42,10 @@ type Config struct {
 
 	// Skills (v1). Procedural knowledge loaded into the LLM context before
 	// planning. Enabled by default; disabling skips skill selection entirely.
-	SkillsEnabled       bool
-	SkillsDir           string
-	SkillsMaxSelected   int
-	SkillsMaxChars      int
-	SkillsReloadOnStart bool
+	SkillsEnabled     bool
+	SkillsDir         string
+	SkillsMaxSelected int
+	SkillsMaxChars    int
 
 	// Skill learning (v2). The runtime may create reviewable skill proposals
 	// from runs; promotion always requires human approval (never automatic).
@@ -131,10 +130,6 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	skillsReloadOnStart, err := boolOrDefault(values, "ORBIS_SKILLS_RELOAD_ON_START", true)
-	if err != nil {
-		return Config{}, err
-	}
 	skillLearningEnabled, err := boolOrDefault(values, "ORBIS_SKILL_LEARNING_ENABLED", true)
 	if err != nil {
 		return Config{}, err
@@ -169,11 +164,10 @@ func Load(path string) (Config, error) {
 
 		WSReadTimeout: wsReadTimeout,
 
-		SkillsEnabled:       skillsEnabled,
-		SkillsDir:           valueOrDefault(values, "ORBIS_SKILLS_DIR", "data/skills"),
-		SkillsMaxSelected:   skillsMaxSelected,
-		SkillsMaxChars:      skillsMaxChars,
-		SkillsReloadOnStart: skillsReloadOnStart,
+		SkillsEnabled:     skillsEnabled,
+		SkillsDir:         valueOrDefault(values, "ORBIS_SKILLS_DIR", "data/skills"),
+		SkillsMaxSelected: skillsMaxSelected,
+		SkillsMaxChars:    skillsMaxChars,
 
 		SkillLearningEnabled: skillLearningEnabled,
 		SkillProposalsDir:    valueOrDefault(values, "ORBIS_SKILL_PROPOSALS_DIR", "data/skill_proposals"),

@@ -1,4 +1,5 @@
 .env
+.playwright-mcp/
 # Ignore runtime data dir contents, but keep the committed seed skills.
 data/*
 !data/skills/

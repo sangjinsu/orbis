@@ -162,10 +162,10 @@ Gateway
 Use:
 
 - goroutines for session lanes, workers, WebSocket read/write loops
-- channels for event queues and worker queues
+- channels with explicit ownership for session event queues and worker handoff
 - `select` for event/timer/cancel handling
 - `context.Context` for cancellation and timeout
-- interfaces for Store, Queue, Worker, Tool, LLM Provider
+- interfaces for Store, Worker, Tool, LLM Provider
 - `log/slog` for structured logs
 - JSONL for initial event and trace persistence
 
@@ -175,7 +175,7 @@ Use:
 
 Orbis adopts a modular monolith architecture.
 
-Keep the runtime as one deployable Go process for v0.1, while separating package responsibilities clearly:
+Keep the current v2.1 baseline as one deployable Go process, while separating package responsibilities clearly:
 
 - `internal/domain` owns stable runtime types.
 - `internal/runtime` owns reducer, lane, dispatcher, and loop coordination.
@@ -184,7 +184,7 @@ Keep the runtime as one deployable Go process for v0.1, while separating package
 - `internal/store` owns persistence interfaces and file-based implementations.
 - `internal/protocol` owns wire DTOs when they diverge from domain types.
 
-Do not split into microservices, distributed workers, external brokers, or separate deployables before the v0.1 kernel is stable.
+Do not split into microservices, distributed workers, external brokers, or separate deployables without an accepted milestone spec and decision record.
 
 ---
 
@@ -197,48 +197,34 @@ Keep command output and error text in their original language when needed, but w
 
 ---
 
-## Current Scope: v0.1
+## Current Shipped Scope: v2.1 + CLI
 
-The first version must focus only on the runtime kernel and WebSocket-based LLM testing.
+`main` has shipped the v0.1, v0.2, v1, v1.5, v2, and v2.1 milestones. The current baseline combines the event-loop-first runtime with reviewable skill learning, operational CLI surfaces, and interactive chat. The next product milestone has not been selected.
 
 ### Included
 
-- Go runtime process
-- HTTP API entrypoint
-- WebSocket API entrypoint
-- In-memory event queue
-- Session lane ordering
-- Run state machine
-- Event reducer
-- Action dispatcher
-- Real LLM worker
-- Mock LLM worker for deterministic tests and local fallback
-- Mock tool worker
-- Timer worker
-- WebSocket event broker
-- `.workspace` LLM wiki structure
-- JSONL event log
-- Basic structured logging
-- Basic runtime trace stream over WebSocket
+- Runtime kernel: one Go process, HTTP/WebSocket gateways, session lanes, pure reducer, action dispatcher, workers, cancellation, timeout, persistence, and observable event streams.
+- Tool calling: runtime-owned validation, policy, idempotency, retry, tool execution, and result events.
+- Skills: deterministic selection, bounded context injection, catalog APIs, and explicit reload.
+- Reviewable learning: proposal creation, structured review edits, approve/reject, audited promotion, and no unreviewed automatic promotion.
+- v2.1 hardening: learned-skill version bumps and archive, global live lifecycle feed, and named reviewer/admin token roles.
+- Runtime debug visualizer for observing session activity.
+- Cobra CLI surfaces: `orbis serve`, `orbis ws`, `orbis skills`, `orbis proposal`, `orbis watch`, and interactive `orbis chat`.
+- `.workspace` source-of-truth records for specs, decisions, project memory, references, and history.
 
-### Excluded for Now
+### Excluded Without an Accepted Milestone
 
-Do not implement these in v0.1:
+Do not add these without an accepted milestone spec and decision record:
 
-- OpenClaw compatibility
-- Hermes compatibility
-- multi-channel messenger gateway
-- Slack/Telegram/Discord adapters
-- skill learning
-- tool search
+- unreviewed automatic skill promotion or self-modification
+- vector or semantic skill search
 - subagents
-- durable kanban/task board
-- advanced long-term memory
 - MCP integration
+- multi-channel messenger gateways or Slack/Telegram/Discord adapters
+- distributed brokers or workers
 - Kubernetes deployment
-- distributed queue or broker
-
-These may be added later after the kernel works.
+- full OpenClaw or Hermes compatibility
+- durable kanban/task board or advanced long-term memory
 
 ---
 
@@ -464,9 +450,9 @@ A session should maintain:
 
 ## WebSocket Runtime Testing
 
-WebSocket support is a core part of v0.1.
+WebSocket support originated in v0.1 and remains a core part of the shipped baseline.
 
-The first goal is to test communication with the runtime and then with an LLM through the runtime.
+The gateway tests communication with the runtime and with an LLM through the runtime.
 
 Do not make WebSocket handlers call the LLM directly.
 
@@ -572,9 +558,9 @@ Use a minimal request/response/event protocol.
 
 ---
 
-## Initial WebSocket Methods
+## Core WebSocket Methods (v0.1 Historical Baseline)
 
-Implement these first:
+These methods formed the initial baseline and remain implemented:
 
 - `session.create`
 - `session.message`
@@ -585,9 +571,9 @@ Implement these first:
 
 ---
 
-## Initial Server Events
+## Core Server Events (v0.1 Historical Baseline)
 
-Implement these server events first:
+These events formed the initial baseline and remain implemented:
 
 - `SessionCreated`
 - `UserMessageReceived`
@@ -630,68 +616,35 @@ GET  /ws
 
 ## Recommended Go Package Layout
 
-Start with a modular monolith.
+Keep the current modular-monolith directory boundaries explicit.
 
 ```text
 .
-├── cmd
-│   └── orbis
-│       └── main.go
-├── internal
-│   ├── app
-│   │   └── server.go
-│   ├── domain
-│   │   ├── event.go
-│   │   ├── action.go
-│   │   ├── session.go
-│   │   └── run.go
-│   ├── runtime
-│   │   ├── loop.go
-│   │   ├── reducer.go
-│   │   ├── dispatcher.go
-│   │   └── lane.go
-│   ├── queue
-│   │   └── memory.go
-│   ├── store
-│   │   ├── store.go
-│   │   └── jsonl.go
-│   ├── worker
-│   │   ├── llm_mock.go
-│   │   ├── llm_provider.go
-│   │   ├── tool_mock.go
-│   │   └── timer.go
-│   ├── gateway
-│   │   ├── http.go
-│   │   └── websocket.go
-│   ├── broker
-│   │   └── broker.go
-│   ├── protocol
-│   │   └── websocket.go
-│   ├── observability
-│   │   ├── log.go
-│   │   └── trace.go
-│   └── config
-│       └── config.go
-├── data
-│   ├── events
-│   ├── sessions
-│   ├── runs
-│   └── traces
-├── docs
-│   ├── architecture.md
-│   └── websocket-protocol.md
-├── .workspace
-│   ├── README.md
-│   ├── decisions
-│   ├── memory
-│   ├── .spec
-│   ├── references
-│   └── scratch
+├── cmd/
+│   └── orbis/
+├── internal/
+│   ├── app/
+│   ├── auth/
+│   ├── broker/
+│   ├── config/
+│   ├── domain/
+│   ├── gateway/
+│   ├── protocol/
+│   ├── runtime/
+│   ├── skill/
+│   ├── store/
+│   ├── tool/
+│   └── worker/
+├── data/
+├── docs/
+├── .workspace/
 ├── go.mod
 ├── go.sum
 ├── Makefile
 └── AGENTS.md
 ```
+
+`RuntimeService` in `internal/app` owns one event channel per session with explicit channel lifecycle ownership; there is no separate queue package in the current architecture.
 
 Do not create unnecessary layers before they are needed.
 
@@ -725,7 +678,7 @@ OPENAI_BASE_URL=https://api.openai.com
 
 `.env` must not be committed. Commit `.env.example` with safe placeholder values.
 
-Avoid heavy frameworks in v0.1.
+The current modular-monolith baseline continues to avoid heavy frameworks.
 
 Do not introduce:
 
@@ -742,7 +695,7 @@ These can be added later.
 
 ## Storage
 
-v0.1 storage is file-based.
+The v0.1 baseline established file-based storage, which remains the current persistence model.
 
 Use JSONL for events and traces:
 
@@ -778,7 +731,7 @@ type Store interface {
 
 ## LLM Worker
 
-v0.1 must use a real LLM provider from the start.
+The v0.1 baseline established a real LLM provider from the start, and the real provider remains the operational default.
 
 The real provider is configured through `.env`.
 The first provider target is OpenAI-compatible HTTP behind the `LLMProvider` interface.
@@ -817,7 +770,7 @@ The runtime should not depend directly on a specific LLM vendor.
 
 ## Tool Worker
 
-v0.1 uses mock tools.
+The shipped tool worker includes deterministic built-in mock tools for tests and runtime exercises.
 
 Initial tools:
 
@@ -1380,7 +1333,7 @@ For this project, initialize at least:
 .workspace/references/go-concurrency.md
 ```
 
-### Initial `.workspace/memory/project.md` Content
+### Recommended Current `.workspace/memory/project.md` Content
 
 Suggested starting content:
 
@@ -1391,15 +1344,15 @@ Suggested starting content:
 
 Orbis Agent Runtime is a Go-based event-loop-first runtime for long-running AI agents.
 
-## Current Goal
+## Current Baseline
 
-Build v0.1 runtime kernel with WebSocket-based LLM communication testing.
+v2.1 runtime and reviewable skill-learning behavior are shipped, together with operational Cobra CLI and interactive chat surfaces.
 
 ## Core Principle
 
 The runtime owns the loop. The LLM is only one worker in the loop.
 
-## Implementation Direction
+## Architecture
 
 Use Go-native concurrency:
 
@@ -1411,25 +1364,28 @@ Use Go-native concurrency:
 - session lane ordering
 - WebSocket event streams
 
+## Next Milestone
+
+No next product milestone has been selected.
+
 ## Current Non-Goals
 
-- OpenClaw compatibility
-- Hermes compatibility
-- multi-channel messenger gateway
-- skills
-- tool search
+- unreviewed automatic skill promotion
+- vector search
 - subagents
-- durable task board
+- MCP integration
+- multi-channel messenger gateways
+- distributed brokers or workers
+- Kubernetes deployment
 ```
 
 ---
 
 ## OpenClaw and Hermes Adoption Priority
 
-Do not add these features immediately.  
-Keep extension points ready.
+Keep extension points ready, but require an accepted milestone spec and decision record before adding any not-yet-shipped concept.
 
-### P0: Already Reflected in v0.1
+### P0: Already Reflected in the Shipped Baseline
 
 OpenClaw-inspired:
 
@@ -1437,6 +1393,7 @@ OpenClaw-inspired:
 - runtime event stream
 - immediate ACK + async progress events
 - cancellation and timeout direction
+- named-role mutation auth and a live global skill lifecycle feed
 
 Hermes-inspired:
 
@@ -1444,8 +1401,10 @@ Hermes-inspired:
 - bounded memory placeholder
 - interruptible execution principle
 - platform-agnostic core principle
+- skills as bounded procedural context
+- reviewable, explicitly approved skill promotion
 
-### P1: Add After v0.1 Kernel Works
+### P1: Candidates Requiring an Accepted Milestone
 
 OpenClaw-inspired:
 
@@ -1456,22 +1415,19 @@ OpenClaw-inspired:
   - `interrupt`
 - context report
 - WebSocket protocol expansion
-- gateway auth/pairing
+- broader gateway auth/pairing
 - global concurrency caps
 
 Hermes-inspired:
 
 - frozen memory snapshot
 - profile isolation
-- toolsets
 - execution backend abstraction
 
 ### P2: Add Later
 
 Hermes-inspired:
 
-- skills as procedural memory
-- progressive skill disclosure
 - tool search
 - subagent guardrails
 
@@ -1524,7 +1480,7 @@ Do not:
 - mutate session state from WebSocket handlers
 - wait for full LLM completion before sending WebSocket ACK
 - allow concurrent state mutation for the same session
-- add OpenClaw/Hermes advanced features before v0.1 is stable
+- add OpenClaw/Hermes advanced features without an accepted milestone spec and decision record
 - hide tool failures
 - fire side effects without idempotency keys
 - create background goroutines without cancellation
@@ -1532,7 +1488,9 @@ Do not:
 
 ---
 
-## Preferred Implementation Order
+## Historical v0.1 Implementation Order (Completed)
+
+This completed sequence is preserved as the v0.1 implementation record, not as the active roadmap:
 
 1. domain types
 2. store interface and JSONL store
@@ -1553,9 +1511,9 @@ Do not:
 
 ---
 
-## v0.1 Done Criteria
+## Historical v0.1 Done Criteria (Completed)
 
-v0.1 is done when:
+These criteria were satisfied for the shipped v0.1 milestone and are preserved as its completion contract:
 
 1. The server starts with one command.
 2. A client can connect through WebSocket.

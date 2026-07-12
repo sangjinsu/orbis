@@ -1,6 +1,7 @@
 package skill
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -257,8 +258,42 @@ func TestSeedSkillsSelectExpected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore(seed) error = %v", err)
 	}
-	if len(store.Snapshot()) != 8 {
-		t.Fatalf("seed skills = %d, want 8", len(store.Snapshot()))
+
+	wantCuratedIDs := map[string]struct{}{
+		"websocket-runtime-test": {},
+		"tool-calling-policy":    {},
+		"go-reducer-pattern":     {},
+		"web-search":             {},
+		"docs-lookup":            {},
+		"github-search":          {},
+		"runtime-debug":          {},
+		"test-plan":              {},
+	}
+	entriesWithLearned := append(store.Snapshot(), Entry{
+		Metadata: Metadata{
+			ID:               "learned-synthetic",
+			Name:             "learned-synthetic",
+			Title:            "Synthetic Learned Skill",
+			Triggers:         []string{"websocket"},
+			Path:             "learned-synthetic.md",
+			Version:          "1",
+			Status:           "active",
+			Priority:         1000,
+			SourceProposalID: "proposal_synthetic",
+		},
+		Chars: 100,
+	})
+	curated := make([]Entry, 0, len(wantCuratedIDs))
+	gotCuratedIDs := make(map[string]struct{}, len(wantCuratedIDs))
+	for _, entry := range entriesWithLearned {
+		if entry.SourceProposalID != "" {
+			continue
+		}
+		curated = append(curated, entry)
+		gotCuratedIDs[entry.ID] = struct{}{}
+	}
+	if !maps.Equal(gotCuratedIDs, wantCuratedIDs) {
+		t.Fatalf("curated seed IDs = %v, want %v", gotCuratedIDs, wantCuratedIDs)
 	}
 
 	tests := []struct {
@@ -277,7 +312,7 @@ func TestSeedSkillsSelectExpected(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			sel := Select(store.Snapshot(), SelectionInput{Text: tc.text}, SelectConfig{MaxSelected: 3, MaxChars: 12000})
+			sel := Select(curated, SelectionInput{Text: tc.text}, SelectConfig{MaxSelected: 3, MaxChars: 12000})
 			if len(sel) == 0 {
 				t.Fatalf("no skill selected for %q", tc.text)
 			}

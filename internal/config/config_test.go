@@ -130,9 +130,6 @@ func TestLoadSkillDefaults(t *testing.T) {
 	if cfg.SkillsMaxChars != 12000 {
 		t.Fatalf("SkillsMaxChars = %d, want 12000", cfg.SkillsMaxChars)
 	}
-	if !cfg.SkillsReloadOnStart {
-		t.Fatal("SkillsReloadOnStart = false, want true by default")
-	}
 }
 
 func TestLoadSkillOverrides(t *testing.T) {
@@ -144,7 +141,6 @@ ORBIS_SKILLS_ENABLED=false
 ORBIS_SKILLS_DIR=/tmp/skills
 ORBIS_SKILLS_MAX_SELECTED=5
 ORBIS_SKILLS_MAX_CHARS=2000
-ORBIS_SKILLS_RELOAD_ON_START=false
 `)
 	if err := os.WriteFile(envPath, content, 0o600); err != nil {
 		t.Fatalf("write .env: %v", err)
@@ -165,9 +161,6 @@ ORBIS_SKILLS_RELOAD_ON_START=false
 	}
 	if cfg.SkillsMaxChars != 2000 {
 		t.Fatalf("SkillsMaxChars = %d, want 2000", cfg.SkillsMaxChars)
-	}
-	if cfg.SkillsReloadOnStart {
-		t.Fatal("SkillsReloadOnStart = true, want false")
 	}
 }
 

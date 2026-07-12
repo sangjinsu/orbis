@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft
+Accepted — historical baseline (completed 2026-06-27)
 
 ## Purpose
 

@@ -5,34 +5,72 @@
       "name": "websocket-runtime-test",
       "title": "WebSocket Runtime Test",
       "description": "Procedure for testing the Orbis runtime through the WebSocket request/response/event stream.",
-      "tags": ["websocket", "runtime", "test"],
-      "triggers": ["websocket", "ws", "runtime test", "streaming", "event stream"],
+      "tags": [
+        "websocket",
+        "runtime",
+        "test"
+      ],
+      "triggers": [
+        "websocket",
+        "ws",
+        "runtime test",
+        "streaming",
+        "event stream"
+      ],
       "path": "websocket-runtime-test.md",
       "version": "1.0.0",
       "status": "active",
       "priority": 100,
-      "related_tools": ["session.message", "run.status", "events.list"]
+      "related_tools": [
+        "session.message",
+        "run.status",
+        "events.list"
+      ]
     },
     {
       "id": "tool-calling-policy",
       "name": "tool-calling-policy",
       "title": "Tool Calling Policy",
       "description": "How Orbis tool calls flow through LLM proposal, runtime policy, worker execution, idempotency, timeout, retry, and result events.",
-      "tags": ["tool", "policy", "retry", "idempotency"],
-      "triggers": ["tool calling", "tool call", "tool policy", "retry", "idempotency"],
+      "tags": [
+        "tool",
+        "policy",
+        "retry",
+        "idempotency"
+      ],
+      "triggers": [
+        "tool calling",
+        "tool call",
+        "tool policy",
+        "retry",
+        "idempotency"
+      ],
       "path": "tool-calling-policy.md",
       "version": "1.0.0",
       "status": "active",
       "priority": 90,
-      "related_tools": ["math.add", "echo", "time.now"]
+      "related_tools": [
+        "math.add",
+        "echo",
+        "time.now"
+      ]
     },
     {
       "id": "go-reducer-pattern",
       "name": "go-reducer-pattern",
       "title": "Go Reducer Pattern",
       "description": "How deterministic reducers should be implemented in Orbis without side effects.",
-      "tags": ["reducer", "golang", "architecture"],
-      "triggers": ["reducer", "deterministic reducer", "state machine", "pure function"],
+      "tags": [
+        "reducer",
+        "golang",
+        "architecture"
+      ],
+      "triggers": [
+        "reducer",
+        "deterministic reducer",
+        "state machine",
+        "pure function"
+      ],
       "path": "go-reducer-pattern.md",
       "version": "1.0.0",
       "status": "active",
@@ -44,8 +82,20 @@
       "name": "web-search",
       "title": "Web Search",
       "description": "Procedure for planning safe web searches for current or externally verifiable information.",
-      "tags": ["web", "search", "source", "current"],
-      "triggers": ["web_search", "web search", "search web", "current info", "latest", "recent changes"],
+      "tags": [
+        "web",
+        "search",
+        "source",
+        "current"
+      ],
+      "triggers": [
+        "web_search",
+        "web search",
+        "search web",
+        "current info",
+        "latest",
+        "recent changes"
+      ],
       "path": "web-search.md",
       "version": "1.0.0",
       "status": "active",
@@ -57,8 +107,20 @@
       "name": "docs-lookup",
       "title": "Docs Lookup",
       "description": "Procedure for checking official documentation before using SDKs, APIs, frameworks, CLIs, or cloud services.",
-      "tags": ["docs", "api", "sdk", "official"],
-      "triggers": ["docs", "official docs", "api docs", "sdk", "cli usage", "configuration"],
+      "tags": [
+        "docs",
+        "api",
+        "sdk",
+        "official"
+      ],
+      "triggers": [
+        "docs",
+        "official docs",
+        "api docs",
+        "sdk",
+        "cli usage",
+        "configuration"
+      ],
       "path": "docs-lookup.md",
       "version": "1.0.0",
       "status": "active",
@@ -70,8 +132,20 @@
       "name": "github-search",
       "title": "GitHub Search",
       "description": "Procedure for searching GitHub repositories, issues, pull requests, releases, and history.",
-      "tags": ["github", "issue", "pull-request", "release"],
-      "triggers": ["github", "github search", "gh search", "issue", "pull request", "release"],
+      "tags": [
+        "github",
+        "issue",
+        "pull-request",
+        "release"
+      ],
+      "triggers": [
+        "github",
+        "github search",
+        "gh search",
+        "issue",
+        "pull request",
+        "release"
+      ],
       "path": "github-search.md",
       "version": "1.0.0",
       "status": "active",
@@ -83,21 +157,49 @@
       "name": "runtime-debug",
       "title": "Runtime Debug",
       "description": "Procedure for debugging Orbis runtime behavior through events, run state, logs, and the debug webview.",
-      "tags": ["runtime", "debug", "websocket", "event"],
-      "triggers": ["runtime debug", "debug runtime", "/debug", "event flow", "run failed", "missing event"],
+      "tags": [
+        "runtime",
+        "debug",
+        "websocket",
+        "event"
+      ],
+      "triggers": [
+        "runtime debug",
+        "debug runtime",
+        "/debug",
+        "event flow",
+        "run failed",
+        "missing event"
+      ],
       "path": "runtime-debug.md",
       "version": "1.0.0",
       "status": "active",
       "priority": 64,
-      "related_tools": ["session.message", "run.status", "events.list"]
+      "related_tools": [
+        "session.message",
+        "run.status",
+        "events.list"
+      ]
     },
     {
       "id": "test-plan",
       "name": "test-plan",
       "title": "Test Plan",
       "description": "Procedure for creating focused verification plans and acceptance checks for Orbis changes.",
-      "tags": ["test", "verification", "acceptance", "smoke"],
-      "triggers": ["test plan", "verify", "verification", "acceptance", "smoke test", "manual test"],
+      "tags": [
+        "test",
+        "verification",
+        "acceptance",
+        "smoke"
+      ],
+      "triggers": [
+        "test plan",
+        "verify",
+        "verification",
+        "acceptance",
+        "smoke test",
+        "manual test"
+      ],
       "path": "test-plan.md",
       "version": "1.0.0",
       "status": "active",

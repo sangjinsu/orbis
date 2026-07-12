@@ -12,6 +12,10 @@ LLMResponseReceived (tool_call proposal)
   -> Reducer            : run -> WAITING_TOOL, emit DispatchToolCall (attempt 1)
   -> Dispatcher         : emit ToolCallStarted, hand off to Tool Worker
   -> Tool Worker        : policy check -> dedup check -> run with timeout -> persist record
+  -> ToolCallRejected   : denied tool never executes
+       -> budget remains: record a tool-result message, emit ToolCallDenialContinued,
+                          dispatch a follow-up LLM call to replan
+       -> max is 0 or budget exhausted: record no tool-result message; emit terminal RunFailed
   -> ToolCallSucceeded  : Reducer dispatches the next LLM call
   -> next LLM call       -> FinalAnswerEmitted -> RunCompleted
 ```
@@ -45,8 +49,14 @@ Before any execution, the policy checks, in order:
 6. timeout within max (`timeout_exceeds_max`)
 7. args are valid JSON (`invalid_args`)
 
-A denied call emits `ToolCallRejected` (with session, run, tool call id, tool
-name, reason code, and message) and fails the run. Denied tools never execute.
+A denied call emits `ToolCallRejected` with the session, run, tool call id,
+tool name, reason code, and message. Denied tools never execute. While the
+per-run `ORBIS_TOOL_DENIAL_CONTINUATION_MAX` budget remains (default `2`), the
+reducer records the rejection as a tool-result message, emits
+`ToolCallDenialContinued`, and dispatches a follow-up LLM call to replan without
+the denied tool. With a value of `0`, or after the budget is spent, the reducer
+records no tool-result message and transitions directly to terminal
+`RunFailed`.
 
 ## Idempotency
 
@@ -102,9 +112,20 @@ ToolCallStarted
 ToolCallSucceeded
 ```
 
-Policy denial:
+Policy denial with continuation budget remaining:
 
 ```
+ToolCallStarted
+ToolCallRejected
+ToolCallDenialContinued
+LLMCallStarted
+LLMResponseReceived
+```
+
+Policy denial with a zero or exhausted continuation budget:
+
+```
+ToolCallStarted
 ToolCallRejected
 RunFailed
 ```

@@ -464,3 +464,36 @@ the parent branch after.
 - v2.2 candidates: multi-entry version history in the index; proposal
   deletion/expiry for the review queue.
 - v3 candidates: vector search, subagents, MCP.
+
+## 2026-07-11: Operational CLI and Interactive Chat Completed
+
+Status: completed (PRs #46, #47, and #48 merged to `main`)
+
+### Summary
+
+The shipped v2.1 runtime now has first-party operational commands for its skill
+catalog and review queue, a live global-feed watcher, a Cobra command tree, and
+an interactive WebSocket chat client. These surfaces call the existing runtime
+APIs; they do not move runtime ownership of state or side effects into the CLI.
+
+### Completed Scope
+
+- PR #46 — learning-loop CLI: `orbis skills list|get|reload`, `orbis proposal
+  list|get|create|edit|approve|reject`, and `orbis watch`. The HTTP commands
+  support human-readable and JSON output plus bearer-token mutations; `watch`
+  subscribes to `session.subscribe` with `scope:"global"` and can emit NDJSON.
+- PR #47 — Cobra migration: the existing command surfaces moved under one
+  Cobra root with command-local help and flags while preserving the established
+  usage-error versus runtime-error exit contract.
+- PR #48 — interactive chat: `orbis chat` subscribes to a generated or supplied
+  session, sends each input line through `session.message`, streams assistant
+  deltas until a terminal run event, and supports normal, quiet, and verbose
+  output. `/quit`, EOF, and interrupt end the REPL cleanly.
+
+### Verification Record
+
+- Current `main` history contains the merge commits for PRs #46, #47, and #48.
+- The Cobra root registers `serve`, `ws`, `skills`, `proposal`, `watch`, and
+  `chat`; existing command tests cover the HTTP/WebSocket client behavior.
+- This historical entry does not claim verification of the later repository
+  cleanup.

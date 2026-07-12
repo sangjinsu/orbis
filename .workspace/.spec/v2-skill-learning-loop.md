@@ -4,6 +4,13 @@
 
 Accepted
 
+## Historical Supersession Note
+
+This accepted spec preserves the v2 learning-loop contract. The v2 gaps for a
+single static admin, edit-before-approve, multi-version promotion, and
+session-independent lifecycle events were resolved by v2.1. See
+`v2.1-learning-loop-hardening.md` for current behavior.
+
 ## Purpose
 
 Introduce a safe, reviewable learning loop for skills. The runtime derives
@@ -167,6 +174,8 @@ LLM: run → propose → approve → promoted skill served after reload.
 
 ## Open Questions
 
-- Multi-version promotion for an existing skill id (v2.1).
-- Reviewer edits before approval (v2.1).
-- Session-independent (global) reload events.
+- Resolved in v2.1: learned skills support in-place integer version bumps with
+  archived prior bodies.
+- Resolved in v2.1: reviewers can edit pending proposals before approval.
+- Resolved in v2.1: skill lifecycle and standalone reload events fan out to a
+  live global feed.

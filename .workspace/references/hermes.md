@@ -2,18 +2,23 @@
 
 ## Why This Matters
 
-Hermes concepts may influence future memory and execution design, but v0.1 remains focused on the runtime kernel.
+Hermes remains a reference for stable context and interruptible execution. The
+shipped baseline already treats skills as bounded procedural context and only
+promotes learned skills after explicit review; Orbis is not a Hermes clone.
 
-## Concepts to Borrow Later
+## Concepts Already Reflected
 
-- prompt stability
-- bounded memory snapshot
-- interruptible execution
-- platform-agnostic core
+- prompt stability through deterministic, bounded skill selection
+- interruptible, platform-agnostic runtime execution
+- skills as procedural context with reviewable promotion
 
-## Concepts Not to Borrow Yet
+## Concepts to Evaluate Only Through a Future Accepted Milestone
 
-- skills as procedural memory
+- frozen memory snapshots and profile isolation
 - tool search
 - subagent guardrails
-- profile isolation
+
+## Concepts Not Currently Adopted
+
+- Hermes compatibility
+- unreviewed automatic skill promotion

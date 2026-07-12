@@ -13,10 +13,6 @@ type ReducerInterface interface {
 	Apply(ctx context.Context, state domain.SessionState, event domain.Event) (ReduceResult, error)
 }
 
-type ActionDispatcher interface {
-	Dispatch(ctx context.Context, action domain.Action) error
-}
-
 type SessionLaneConfig struct {
 	SessionID string
 	Reducer   ReducerInterface
